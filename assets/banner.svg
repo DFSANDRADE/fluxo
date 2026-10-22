@@ -1,0 +1,30 @@
+<svg width="900" height="260" viewBox="0 0 900 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Fluxo">
+  <defs>
+    <linearGradient id="bg" x1="40" y1="40" x2="220" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c9cff"/>
+      <stop offset="1" stop-color="#c17cff"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="40" x2="0" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".22"/>
+      <stop offset=".5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="300" y1="90" x2="760" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c9cff"/>
+      <stop offset="1" stop-color="#c17cff"/>
+    </linearGradient>
+  </defs>
+  <!-- ícone -->
+  <g transform="translate(40,40)">
+    <rect width="180" height="180" rx="46" fill="url(#bg)"/>
+    <rect width="180" height="180" rx="46" fill="url(#sheen)"/>
+    <g fill="#ffffff">
+      <path d="M52 62 L52 118 L81 90 Z" opacity=".28"/>
+      <path d="M72 59 L72 121 L105 90 Z" opacity=".55"/>
+      <path d="M92 56 L92 124 L131 90 Z"/>
+    </g>
+  </g>
+  <!-- wordmark -->
+  <text x="258" y="150" font-family="'Segoe UI',system-ui,-apple-system,Helvetica,Arial,sans-serif" font-size="110" font-weight="800" letter-spacing="-3" fill="url(#ink)">Fluxo</text>
+  <!-- tagline -->
+  <text x="262" y="196" font-family="'Segoe UI',system-ui,-apple-system,Helvetica,Arial,sans-serif" font-size="25" font-weight="500" letter-spacing="0.5" fill="#8a8a99">IPTV, torrents e mídia — tudo no navegador</text>
+</svg>

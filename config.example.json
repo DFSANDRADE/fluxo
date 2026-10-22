@@ -1,0 +1,16 @@
+{
+  "port": 8085,
+  "provider": {
+    "host": "SEU_PROVEDOR.exemplo",
+    "username": "SEU_USUARIO",
+    "password": "SUA_SENHA"
+  },
+  "userAgent": "okhttp/4.9",
+
+  "jackett": {
+    "url": "http://IP_DO_JACKETT:9117",
+    "apikey": "SUA_API_KEY_DO_JACKETT"
+  },
+  "transmission": { "host": "127.0.0.1", "port": 9091 },
+  "torrentDir": "/caminho/para/torrents"
+}

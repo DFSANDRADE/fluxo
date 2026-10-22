@@ -1,0 +1,22 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Fluxo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c9cff"/>
+      <stop offset="1" stop-color="#c17cff"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".22"/>
+      <stop offset=".5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- squircle -->
+  <rect x="16" y="16" width="480" height="480" rx="120" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="120" fill="url(#sheen)"/>
+  <!-- rastro de movimento: triângulos fantasma (fluxo) -->
+  <g fill="#ffffff">
+    <path d="M150 176 L150 336 L232 256 Z" opacity=".28"/>
+    <path d="M205 168 L205 344 L298 256 Z" opacity=".55"/>
+    <!-- play principal -->
+    <path d="M262 160 L262 352 L372 256 Z"/>
+  </g>
+</svg>

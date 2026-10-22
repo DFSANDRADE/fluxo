@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0a0f">
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
+  <title>Fluxo</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js" defer></script>
+</head>
+<body>
+  <div id="glow"></div>
+
+  <header class="topbar">
+    <div class="brand"><span class="logo">◈</span> Fluxo</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-type="live">Ao vivo</button>
+      <button class="tab" data-type="vod">Filmes</button>
+      <button class="tab" data-type="series">Séries</button>
+      <button class="tab" data-type="local">Baixados</button>
+      <button class="tab" data-type="torrents">Torrents</button>
+    </nav>
+    <div class="actions">
+      <button id="lite" class="lite-btn" title="Modo leve" aria-label="Modo leve">⚡</button>
+      <button id="dlbtn" class="lite-btn" title="Histórico (baixados e assistidos)" aria-label="Histórico">👁</button>
+      <button id="warmbtn" class="lite-btn" title="Atualizar conteúdo (baixar capas pro cache)" aria-label="Atualizar conteúdo">⟳</button>
+    </div>
+  </header>
+
+  <div class="searchwrap">
+    <div class="usearch">
+      <svg class="uicon" viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M10 2a8 8 0 105.3 14l5.4 5.3 1.4-1.4-5.3-5.4A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z"/></svg>
+      <div class="utags" id="srcdots"></div>
+      <input id="q" type="search" placeholder="Busca unificada, marque as tags desejadas" autocomplete="off">
+    </div>
+  </div>
+  <main id="rows"></main>
+
+  <!-- Modal de detalhe (filme / série) -->
+  <div class="modal hidden" id="detail">
+    <div class="sheet">
+      <button class="close" data-close>✕</button>
+      <div class="hero" id="d-hero">
+        <div class="hero-fade"></div>
+        <div class="hero-body">
+          <h1 id="d-title"></h1>
+          <div class="meta" id="d-meta"></div>
+          <p class="plot" id="d-plot"></p>
+          <div class="actions">
+            <button class="btn primary" id="d-play"><span>▶</span> Reproduzir</button>
+            <button class="btn ghost" id="d-dl-srv">⬇ Baixar offline</button>
+            <button class="btn ghost" id="d-dl-dev">⇩ Aparelho</button>
+            <button class="btn ghost" id="d-fav">♡ Favoritar</button>
+          </div>
+        </div>
+      </div>
+      <div class="d-body">
+        <div id="d-cast" class="cast"></div>
+        <div id="d-seasons"></div>
+        <div id="d-episodes" class="episodes"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Player -->
+  <div class="modal hidden" id="player">
+    <button class="close" data-close-player>✕</button>
+    <div class="playerbox">
+      <video id="video" controls autoplay playsinline preload="auto"></video>
+      <button id="compat" class="compat-btn" style="display:none">⚙ Compatibilidade</button>
+      <div class="buffering hidden" id="buffering"><div class="spin"></div></div>
+      <div class="nowplaying" id="nowplaying"></div>
+      <div class="up-next hidden" id="upnext"></div>
+    </div>
+  </div>
+
+  <!-- Downloads -->
+  <div class="modal hidden" id="downloads">
+    <div class="sheet dl-sheet">
+      <button class="close" data-close-dl>✕</button>
+      <div class="d-body">
+        <h1 style="font-size:22px;font-weight:650;margin-bottom:4px">Histórico</h1>
+        <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Tudo que você assistiu e baixou</p>
+        <div id="dl-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

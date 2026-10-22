@@ -1,0 +1,19 @@
+# credenciais e config local (NUNCA versionar)
+config.json
+
+# dependências (o Fluxo é zero-deps, mas por garantia)
+node_modules/
+
+# logs e temporários
+*.log
+*.tmp
+
+# dados locais (ficam fora do repo, mas por garantia)
+*_index.json
+.fluxo-state.json
+cache-img/
+downloads/
+
+# sistema operacional
+.DS_Store
+Thumbs.db
