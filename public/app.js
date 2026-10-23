@@ -197,6 +197,7 @@ async function renderLocal(rows) {
 function playLocal(it) {
   clearTimeout(autoCacheT);
   openPlayer(it.name);
+  showBuffer('Carregando arquivo…');          // local: arquivo na rede, não é o provedor
   destroyPlayers(); video.onended = null;
   const c = CONT['local:' + it.file]; const resume = c && c.pos ? c.pos : 0;
   saveCtx = { type: 'local', id: it.file, name: it.name, resumePos: resume };
@@ -230,6 +231,11 @@ async function loadTrackerStatus() {
   const box = $('#torr-trackers'); if (!box) return;
   if (!box.innerHTML) box.innerHTML = '<span class="tk-load">checando trackers…</span>';
   let d = { trackers: [] }; try { d = await api('/api/torrent/trackers'); } catch {}
+  if (d.warming) {                                   // servidor ainda esquentando a saúde dos trackers
+    box.innerHTML = '<span class="tk-load">checando trackers…</span>';
+    if (TYPE === 'torrents') setTimeout(loadTrackerStatus, 3000);
+    return;
+  }
   if (!d.trackers || !d.trackers.length) { box.innerHTML = ''; return; }
   const bad = d.trackers.filter(t => !t.ok);
   let html = '';
@@ -387,7 +393,9 @@ async function buildHero(cat) {
 async function openMovie(it) {
   const id = idOf(it);
   openDetail();
-  let d = {}; try { d = await api(`/api/vod?id=${id}`); } catch {}
+  detailLoading(it.name);
+  let d = null; try { d = await api(`/api/vod?id=${id}`); } catch {}
+  if (!d) { detailError(it.name); return; }
   const info = d.info || {}; const md = d.movie_data || {};
   const ext = md.container_extension || 'mp4';
   const bg = (info.backdrop_path && info.backdrop_path[0]) || info.movie_image || it.stream_icon;
@@ -406,7 +414,9 @@ async function openMovie(it) {
 async function openSeries(it) {
   const id = idOf(it);
   openDetail();
-  let d = {}; try { d = await api(`/api/series?id=${id}`); } catch {}
+  detailLoading(it.name);
+  let d = null; try { d = await api(`/api/series?id=${id}`); } catch {}
+  if (!d) { detailError(it.name); return; }
   const info = d.info || {};
   const bg = (info.backdrop_path && info.backdrop_path[0]) || info.cover || it.cover || it.stream_icon;
   fillHero(it.name || info.name, bg, [
@@ -485,6 +495,18 @@ function setFav(it, type) {
 
 /* ---------- modais abrir/fechar ---------- */
 function openDetail() { $('#detail').classList.remove('hidden'); }
+function detailLoading(name) {
+  $('#d-title').textContent = name || 'Carregando…';
+  $('#d-plot').textContent = 'Buscando informações no provedor…';
+  $('#d-meta').innerHTML = ''; const c = $('#d-cast'); if (c) { c.innerHTML = ''; c.style.display = 'none'; }
+  $('#d-seasons').innerHTML = ''; $('#d-episodes').innerHTML = '';
+  $('#d-hero').style.backgroundImage = '';
+}
+function detailError(name) {
+  $('#d-title').textContent = name || 'Ops…';
+  $('#d-plot').textContent = 'O provedor demorou a responder (pode estar lento ou fora do ar). Feche e tente abrir de novo em instantes.';
+  $('#d-meta').innerHTML = ''; $('#d-episodes').innerHTML = '';
+}
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $('#detail').classList.add('hidden'));
 $('#detail').onclick = (e) => { if (e.target.id === 'detail') $('#detail').classList.add('hidden'); };
 
@@ -493,21 +515,41 @@ let mpg = null, hls = null;
 let saveCtx = null, saveT = 0, autoCacheT = null, retryN = 0;
 const video = $('#video');
 
-video.addEventListener('waiting', () => $('#buffering').classList.remove('hidden'));
-['playing', 'canplay', 'pause'].forEach(ev => video.addEventListener(ev, () => $('#buffering').classList.add('hidden')));
-video.addEventListener('playing', () => { retryN = 0; });
+// overlay de carregamento com texto claro (deixa evidente que a espera é do PROVEDOR, não do Fluxo)
+let bufT = null;
+function showBuffer(msg) {
+  const b = $('#buffering'); b.classList.remove('hidden');
+  const m = $('#buffering .buf-msg'); if (m) m.textContent = msg || 'Esperando o provedor…';
+  clearTimeout(bufT);
+  bufT = setTimeout(() => { const mm = $('#buffering .buf-msg'); if (mm && !b.classList.contains('hidden')) mm.textContent = 'O provedor está lento — segurando a conexão…'; }, 8000);
+}
+function hideBuffer() { $('#buffering').classList.add('hidden'); clearTimeout(bufT); }
 
-// se a conexão cair no meio do filme/episódio, reconecta e volta de onde parou
-video.addEventListener('error', () => {
+// reconecta filme/episódio no ponto atual (usado em erro E em travamento prolongado)
+let stallT = null, lastProg = 0;
+function reconnectStream() {
   if (!saveCtx || (saveCtx.type !== 'movie' && saveCtx.type !== 'series')) return;
-  if (retryN++ > 6) { toast('Não consegui reconectar'); return; }
+  if (retryN++ > 6) { hideBuffer(); toast('Não consegui reconectar — o provedor pode estar fora do ar'); return; }
   const t = video.currentTime || saveCtx.resumePos || 0;
   const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
   const d = dlOf(kind, saveCtx.id);
   const url = (d && d.status === 'done') ? `/dl/${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`;
-  toast('Reconectando…');
-  setTimeout(() => { destroyPlayers(); video.src = url; video.load(); video.onloadedmetadata = () => { if (t > 3) video.currentTime = t; }; video.play().catch(() => {}); }, 1500);
+  showBuffer('Reconectando ao provedor…');
+  setTimeout(() => { destroyPlayers(); video.src = url; video.load(); video.onloadedmetadata = () => { if (t > 3) video.currentTime = t; }; video.play().catch(() => {}); }, 800);
+}
+
+video.addEventListener('waiting', () => {
+  showBuffer();
+  clearTimeout(stallT);
+  if (saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series')) {   // travou e não anda? reconecta
+    stallT = setTimeout(() => { if (!video.paused && Date.now() - lastProg > 11000) reconnectStream(); }, 12000);
+  }
 });
+['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
+video.addEventListener('pause', () => { hideBuffer(); clearTimeout(stallT); });
+video.addEventListener('playing', () => { retryN = 0; });
+video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); });
+video.addEventListener('error', reconnectStream);
 
 // garante o filme offline: após 30s assistindo, começa a baixar pro servidor em 2º plano
 function scheduleAutoCache(type, id, ext, name, icon) {
@@ -523,7 +565,7 @@ function destroyPlayers() {
   if (mpg) { try { mpg.destroy(); } catch {} mpg = null; }
   if (hls) { try { hls.destroy(); } catch {} hls = null; }
 }
-function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); const cb = $('#compat'); if (cb) cb.style.display = 'none'; $('#player').classList.remove('hidden'); }
+function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); const cb = $('#compat'); if (cb) cb.style.display = 'none'; $('#player').classList.remove('hidden'); showBuffer('Conectando ao provedor…'); }
 function closePlayer() {
   $('#player').classList.add('hidden');
   try { video.pause(); } catch {}

@@ -28,7 +28,7 @@ input,textarea{user-select:text;-webkit-user-select:text;cursor:text}
   background:rgba(10,10,16,.55);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
   border-bottom:1px solid var(--stroke)}
 .brand{font-size:21px;font-weight:700;letter-spacing:.3px;display:flex;align-items:center;gap:9px;white-space:nowrap;z-index:1}
-.brand .logo{background:var(--accent);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:24px}
+.brand .logo{width:26px;height:26px;display:block;border-radius:7px}
 .tabs{position:absolute;left:50%;transform:translateX(-50%);display:flex;gap:4px;padding:4px;border-radius:999px;background:var(--panel);border:1px solid var(--stroke)}
 .tab{appearance:none;border:0;background:transparent;color:var(--muted);font:inherit;font-weight:600;font-size:14px;
   padding:8px 18px;border-radius:999px;cursor:pointer;transition:.2s}
@@ -213,8 +213,9 @@ body.lite .rowarrow{backdrop-filter:none;background:#1a1a22}
 .lite-btn.on{color:#ffd36e;border-color:#ffd36e55;background:rgba(255,211,110,.1)}
 
 /* indicador de buffer */
-.buffering{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
+.buffering{position:absolute;inset:0;display:grid;place-items:center;align-content:center;gap:16px;pointer-events:none}
 .buffering.hidden{display:none}
+.buf-msg{font-size:14px;color:#cfcfd8;font-weight:500;text-shadow:0 1px 6px rgba(0,0,0,.7);text-align:center;max-width:80%}
 .spin{width:52px;height:52px;border-radius:50%;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 

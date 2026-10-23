@@ -23,6 +23,25 @@ const TM = CONFIG.transmission || { host: '127.0.0.1', port: 9091 };
 const TORRENT_DIR = CONFIG.torrentDir || '/dados/midia/torrents';
 
 let trackerCache = { at: 0, list: [] };
+let trackerBusy = false;
+const TRK_TTL = 5 * 60 * 1000;   // cache da saúde dos trackers (5 min); revalida em 2º plano
+function refreshTrackers(cb) {
+  if (!JK || trackerBusy) { if (cb) cb(); return; }
+  trackerBusy = true;
+  const url = `${JK.url}/api/v2.0/indexers/all/results?apikey=${JK.apikey}&Query=matrix`;
+  fetchBuffer(url, (e, b) => {
+    trackerBusy = false;
+    if (!e) {
+      try {
+        const d = JSON.parse(b.toString());
+        const list = (d.Indexers || []).map(i => ({ name: i.Name, ok: !i.Error, error: String(i.Error || '').replace(/Jackett\.Common\.IndexerException:\s*/g, '').replace(/\s+/g, ' ').slice(0, 160) }))
+          .sort((a, c) => (a.ok === c.ok) ? a.name.localeCompare(c.name) : (a.ok ? 1 : -1));
+        if (list.length) trackerCache = { at: Date.now(), list };
+      } catch {}
+    }
+    if (cb) cb();
+  }, 45000);
+}
 // RPC do transmission (faz o handshake do X-Transmission-Session-Id)
 let tmSession = '';
 function transmissionRPC(method, args, cb, retried) {
@@ -518,20 +537,13 @@ const server = http.createServer((req, res) => {
   }
   if (p === '/api/torrent/trackers') {
     if (!JK) return sendJSON(res, 200, { trackers: [] });
-    if (Date.now() - trackerCache.at < 120000 && trackerCache.list.length) return sendJSON(res, 200, { trackers: trackerCache.list });
-    const url = `${JK.url}/api/v2.0/indexers/all/results?apikey=${JK.apikey}&Query=matrix`;
-    return fetchBuffer(url, (e, b) => {
-      let list = trackerCache.list;
-      if (!e) {
-        try {
-          const d = JSON.parse(b.toString());
-          list = (d.Indexers || []).map(i => ({ name: i.Name, ok: !i.Error, error: String(i.Error || '').replace(/Jackett\.Common\.IndexerException:\s*/g, '').replace(/\s+/g, ' ').slice(0, 160) }))
-            .sort((a, c) => (a.ok === c.ok) ? a.name.localeCompare(c.name) : (a.ok ? 1 : -1));
-        } catch {}
-      }
-      trackerCache = { at: Date.now(), list };
-      sendJSON(res, 200, { trackers: list });
-    }, 45000);
+    const fresh = Date.now() - trackerCache.at < TRK_TTL;
+    if (trackerCache.list.length) {              // tem cache: responde na hora
+      if (!fresh) refreshTrackers();             // e revalida em 2º plano se estiver velho
+      return sendJSON(res, 200, { trackers: trackerCache.list });
+    }
+    refreshTrackers();                           // cache vazio (esquentando): não trava o usuário
+    return sendJSON(res, 200, { trackers: [], warming: true });
   }
   if (p === '/img') {
     const src = q.get('u');
@@ -590,4 +602,5 @@ server.listen(PORT, () => {
   console.log(`Fluxo rodando em http://0.0.0.0:${PORT}  (provedor: ${host})`);
   buildIndex(); // aquece o índice de busca em segundo plano
   buildEPG();   // aquece o guia (XMLTV) em segundo plano
+  if (JK) { setTimeout(refreshTrackers, 4000); setInterval(refreshTrackers, 4 * 60 * 1000); } // saúde dos trackers pronta antes do 1º clique
 });

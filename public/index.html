@@ -14,7 +14,7 @@
   <div id="glow"></div>
 
   <header class="topbar">
-    <div class="brand"><span class="logo">◈</span> Fluxo</div>
+    <div class="brand"><img class="logo" src="/logo.svg" width="26" height="26" alt=""> Fluxo</div>
     <nav class="tabs" id="tabs">
       <button class="tab active" data-type="live">Ao vivo</button>
       <button class="tab" data-type="vod">Filmes</button>
@@ -70,7 +70,7 @@
     <div class="playerbox">
       <video id="video" controls autoplay playsinline preload="auto"></video>
       <button id="compat" class="compat-btn" style="display:none">⚙ Compatibilidade</button>
-      <div class="buffering hidden" id="buffering"><div class="spin"></div></div>
+      <div class="buffering hidden" id="buffering"><div class="spin"></div><div class="buf-msg">Conectando ao provedor…</div></div>
       <div class="nowplaying" id="nowplaying"></div>
       <div class="up-next hidden" id="upnext"></div>
     </div>
