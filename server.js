@@ -22,25 +22,74 @@ const JK = CONFIG.jackett || null;
 const TM = CONFIG.transmission || { host: '127.0.0.1', port: 9091 };
 const TORRENT_DIR = CONFIG.torrentDir || '/dados/midia/torrents';
 
-let trackerCache = { at: 0, list: [] };
+let trackerCache = { at: 0, list: [] };      // saúde dos trackers: [{name,ok,error}]
 let trackerBusy = false;
-const TRK_TTL = 5 * 60 * 1000;   // cache da saúde dos trackers (5 min); revalida em 2º plano
-function refreshTrackers(cb) {
-  if (!JK || trackerBusy) { if (cb) cb(); return; }
-  trackerBusy = true;
-  const url = `${JK.url}/api/v2.0/indexers/all/results?apikey=${JK.apikey}&Query=matrix`;
-  fetchBuffer(url, (e, b) => {
-    trackerBusy = false;
+let indexerList = [];                        // [{id,name}] aprendido do Jackett e cacheado em disco
+const TRK_TTL = 5 * 60 * 1000;               // cache da saúde (5 min); revalida em 2º plano
+const IDX_FILE = '/dados/.fluxo-indexers.json';
+const PER_TRACKER_TIMEOUT = 12000;           // tempo-limite POR tracker: quem passar disso é pulado (não trava os outros)
+try { indexerList = JSON.parse(fs.readFileSync(IDX_FILE, 'utf8')) || []; } catch {}
+const cleanErr = (s) => String(s || '').replace(/Jackett\.Common\.IndexerException:\s*/g, '').replace(/\s+/g, ' ').slice(0, 160);
+
+// descobre a lista de indexadores (id+nome) via query agregada — só pra APRENDER os ids (roda em 2º plano, cacheado)
+function fetchIndexerList(cb) {
+  if (!JK) { if (cb) cb(); return; }
+  fetchBuffer(`${JK.url}/api/v2.0/indexers/all/results?apikey=${JK.apikey}&Query=matrix`, (e, b) => {
     if (!e) {
       try {
-        const d = JSON.parse(b.toString());
-        const list = (d.Indexers || []).map(i => ({ name: i.Name, ok: !i.Error, error: String(i.Error || '').replace(/Jackett\.Common\.IndexerException:\s*/g, '').replace(/\s+/g, ' ').slice(0, 160) }))
-          .sort((a, c) => (a.ok === c.ok) ? a.name.localeCompare(c.name) : (a.ok ? 1 : -1));
-        if (list.length) trackerCache = { at: Date.now(), list };
+        const list = (JSON.parse(b.toString()).Indexers || []).filter(i => i.ID).map(i => ({ id: i.ID, name: i.Name }));
+        if (list.length) { indexerList = list; try { fs.writeFileSync(IDX_FILE, JSON.stringify(list)); } catch {} }
       } catch {}
     }
     if (cb) cb();
-  }, 45000);
+  }, 60000);
+}
+
+// consulta CADA indexador em paralelo com timeout individual; tracker lento/morto é pulado (os demais entregam).
+// overallTimeout (opcional): teto geral — devolve o que já chegou e marca o resto como pulado (busca rápida).
+function jackettParallel(query, perTimeout, done, overallTimeout) {
+  if (!JK || !indexerList.length) return done({ results: [], health: [] });
+  const ids = indexerList.slice();
+  const results = [], health = [], seen = {};
+  let finished = false, pending = ids.length;
+  const finish = () => {
+    if (finished) return; finished = true;
+    ids.forEach(ix => { if (!seen[ix.id]) health.push({ name: ix.name, ok: false, error: 'sem resposta no tempo (pulado)' }); });
+    health.sort((a, c) => (a.ok === c.ok) ? a.name.localeCompare(c.name) : (a.ok ? 1 : -1));
+    done({ results, health });
+  };
+  const cap = overallTimeout ? setTimeout(finish, overallTimeout) : null;
+  ids.forEach(ix => {
+    const url = `${JK.url}/api/v2.0/indexers/${encodeURIComponent(ix.id)}/results?apikey=${JK.apikey}&Query=${encodeURIComponent(query)}`;
+    fetchBuffer(url, (e, b) => {
+      if (finished) return;
+      seen[ix.id] = true;
+      let ok = false, error = '';
+      if (e) error = 'sem resposta no tempo (pulado)';
+      else {
+        try {
+          const d = JSON.parse(b.toString());
+          const ierr = (d.Indexers && d.Indexers[0] && d.Indexers[0].Error) || null;
+          if (ierr) error = cleanErr(ierr);
+          else { ok = true; (d.Results || []).forEach(r => results.push(r)); }
+        } catch { error = 'resposta inválida'; }
+      }
+      health.push({ name: ix.name, ok, error });
+      if (--pending === 0) { if (cap) clearTimeout(cap); finish(); }
+    }, perTimeout);
+  });
+}
+
+// atualiza a saúde dos trackers usando a consulta paralela resiliente
+function refreshTrackers(cb) {
+  if (!JK || trackerBusy) { if (cb) cb(); return; }
+  trackerBusy = true;
+  const run = () => jackettParallel('matrix', PER_TRACKER_TIMEOUT, ({ health }) => {
+    trackerBusy = false;
+    if (health.length) trackerCache = { at: Date.now(), list: health };
+    if (cb) cb();
+  });
+  if (!indexerList.length) fetchIndexerList(run); else run();
 }
 // RPC do transmission (faz o handshake do X-Transmission-Session-Id)
 let tmSession = '';
@@ -502,19 +551,15 @@ const server = http.createServer((req, res) => {
   }
   if (p === '/api/torrent/search') {
     if (!JK) return sendJSON(res, 200, { results: [], noJackett: true });
-    const url = `${JK.url}/api/v2.0/indexers/all/results?apikey=${JK.apikey}&Query=${encodeURIComponent(q.get('q') || '')}`;
-    return fetchBuffer(url, (e, b) => {
-      if (e) return sendJSON(res, 502, { error: 'jackett' });
-      let out = [];
-      try {
-        const d = JSON.parse(b.toString());
-        const fixLink = (l) => l ? l.replace('http://127.0.0.1:9117', JK.url).replace('http://localhost:9117', JK.url) : '';
-        out = (d.Results || []).map(r => ({ title: r.Title, size: r.Size, seeders: r.Seeders, peers: r.Peers, tracker: r.Tracker, magnet: r.MagnetUri || fixLink(r.Link) }))
-          .filter(r => r.magnet && (r.seeders || 0) < 30000)   // corta spam de seeds falsos (int16 max)
-          .sort((a, c) => (c.seeders || 0) - (a.seeders || 0)).slice(0, 80);
-      } catch {}
-      sendJSON(res, 200, { results: out });
-    }, 45000);
+    const fixLink = (l) => l ? l.replace('http://127.0.0.1:9117', JK.url).replace('http://localhost:9117', JK.url) : '';
+    const run = () => jackettParallel(q.get('q') || '', PER_TRACKER_TIMEOUT, ({ results, health }) => {
+      const out = results.map(r => ({ title: r.Title, size: r.Size, seeders: r.Seeders, peers: r.Peers, tracker: r.Tracker, magnet: r.MagnetUri || fixLink(r.Link) }))
+        .filter(r => r.magnet && (r.seeders || 0) < 30000)   // corta spam de seeds falsos (int16 max)
+        .sort((a, c) => (c.seeders || 0) - (a.seeders || 0)).slice(0, 80);
+      sendJSON(res, 200, { results: out, skipped: health.filter(h => !h.ok).map(h => h.name) });
+    }, 8000);   // teto geral: no máximo ~8s, mesmo se algum tracker pendurar
+    if (!indexerList.length) return fetchIndexerList(run);   // aprende os ids na 1ª vez
+    return run();
   }
   if (p === '/api/torrent/add') {
     const magnet = q.get('magnet') || '';
@@ -602,5 +647,9 @@ server.listen(PORT, () => {
   console.log(`Fluxo rodando em http://0.0.0.0:${PORT}  (provedor: ${host})`);
   buildIndex(); // aquece o índice de busca em segundo plano
   buildEPG();   // aquece o guia (XMLTV) em segundo plano
-  if (JK) { setTimeout(refreshTrackers, 4000); setInterval(refreshTrackers, 4 * 60 * 1000); } // saúde dos trackers pronta antes do 1º clique
+  if (JK) {
+    setTimeout(() => fetchIndexerList(refreshTrackers), 3000); // aprende os ids e já checa a saúde (antes do 1º clique)
+    setInterval(refreshTrackers, 4 * 60 * 1000);               // saúde periódica (consulta paralela, resiliente)
+    setInterval(fetchIndexerList, 30 * 60 * 1000);             // re-descobre ids (trackers novos/removidos)
+  }
 });
