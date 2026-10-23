@@ -1,11 +1,20 @@
 {
   "port": 8085,
-  "provider": {
-    "host": "SEU_PROVEDOR.exemplo",
-    "username": "SEU_USUARIO",
-    "password": "SUA_SENHA"
-  },
   "userAgent": "okhttp/4.9",
+
+  "providers": [
+    {
+      "id": "principal",
+      "name": "Principal",
+      "host": "SEU_PROVEDOR.exemplo",
+      "username": "SEU_USUARIO",
+      "password": "SUA_SENHA"
+    }
+  ],
+
+  "profiles": [
+    { "id": "eu", "name": "Eu", "kid": false, "providers": ["principal"], "color": "#7c9cff" }
+  ],
 
   "jackett": {
     "url": "http://IP_DO_JACKETT:9117",

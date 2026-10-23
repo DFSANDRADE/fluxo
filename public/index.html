@@ -23,9 +23,12 @@
       <button class="tab" data-type="torrents">Torrents</button>
     </nav>
     <div class="actions">
+      <select id="pvsel" class="pvsel" title="Trocar provedor" style="display:none"></select>
+      <button id="profbtn" class="lite-btn profbtn" title="Trocar perfil" aria-label="Perfil">·</button>
       <button id="lite" class="lite-btn" title="Modo leve" aria-label="Modo leve">⚡</button>
       <button id="dlbtn" class="lite-btn" title="Histórico (baixados e assistidos)" aria-label="Histórico">👁</button>
       <button id="warmbtn" class="lite-btn" title="Atualizar conteúdo (baixar capas pro cache)" aria-label="Atualizar conteúdo">⟳</button>
+      <button id="setbtn" class="lite-btn" title="Configurações" aria-label="Configurações">⚙</button>
     </div>
   </header>
 
@@ -85,6 +88,24 @@
         <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Tudo que você assistiu e baixou</p>
         <div id="dl-list"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Seletor de perfil (quem está assistindo) -->
+  <div class="modal hidden" id="profiles">
+    <div class="prof-pick">
+      <div class="prof-brand"><img src="/logo.svg" width="34" height="34" alt=""> Fluxo</div>
+      <h1>Quem está assistindo?</h1>
+      <div id="prof-grid" class="prof-grid"></div>
+      <button id="prof-manage" class="btn ghost">⚙ Gerenciar perfis e provedores</button>
+    </div>
+  </div>
+
+  <!-- Configurações (provedores, perfis, PIN) -->
+  <div class="modal hidden" id="settings">
+    <div class="sheet set-sheet">
+      <button class="close" data-close-set>✕</button>
+      <div class="d-body" id="set-body"></div>
     </div>
   </div>
 

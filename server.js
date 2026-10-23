@@ -53,11 +53,11 @@ function readJSON(req, cb) {   // lê corpo POST como JSON (limite 1MB)
   req.on('end', () => { try { cb(JSON.parse(body || '{}')); } catch { cb(null); } });
 }
 const getPv = (id) => PROVIDERS[id] || PROVIDERS[DEFAULT_PV];
+function cookieVal(req, name) { const m = new RegExp('(?:^|;\\s*)' + name + '=([^;]+)').exec((req && req.headers.cookie) || ''); try { return m ? decodeURIComponent(m[1]) : ''; } catch { return m ? m[1] : ''; } }
 function pvOf(q, req) {                       // provedor da requisição: ?pv= ou cookie fluxo_pv, senão o padrão
-  let id = q && q.get('pv');
-  if (!id && req) { const m = /(?:^|;\s*)fluxo_pv=([^;]+)/.exec(req.headers.cookie || ''); if (m) { try { id = decodeURIComponent(m[1]); } catch { id = m[1]; } } }
-  return getPv(id);
+  return getPv((q && q.get('pv')) || cookieVal(req, 'fluxo_pv'));
 }
+const isKid = (q, req) => (q && q.get('kid') === '1') || cookieVal(req, 'fluxo_kid') === '1';   // perfil Kid (query ou cookie)
 const JK = CONFIG.jackett || null;
 const TM = CONFIG.transmission || { host: '127.0.0.1', port: 9091 };
 const TORRENT_DIR = CONFIG.torrentDir || '/dados/midia/torrents';
@@ -547,12 +547,17 @@ const server = http.createServer((req, res) => {
   if (p === '/api/admin/provider') return readJSON(req, d => {
     if (!d || !pinOk(d.pin)) return sendJSON(res, 403, { error: 'pin' });
     const inp = d.provider || {};
-    if (!inp.host || !inp.username || !inp.password) return sendJSON(res, 400, { error: 'faltam host/usuário/senha' });
+    if (!inp.host) return sendJSON(res, 400, { error: 'falta o host' });
     CONFIG.providers = CONFIG.providers || [];
     let id = inp.id;
-    if (id && CONFIG.providers.some(x => x.id === id)) {
-      Object.assign(CONFIG.providers.find(x => x.id === id), { name: inp.name || inp.host, host: inp.host, username: inp.username, password: inp.password, userAgent: inp.userAgent || undefined });
-    } else {
+    if (id && CONFIG.providers.some(x => x.id === id)) {   // edição: usuário/senha em branco mantêm os atuais
+      const cur = CONFIG.providers.find(x => x.id === id);
+      cur.name = inp.name || cur.name; cur.host = inp.host;
+      if (inp.username) cur.username = inp.username;
+      if (inp.password) cur.password = inp.password;
+      if (inp.userAgent !== undefined) cur.userAgent = inp.userAgent || undefined;
+    } else {                                               // novo: precisa de usuário e senha
+      if (!inp.username || !inp.password) return sendJSON(res, 400, { error: 'novo provedor precisa de usuário e senha' });
       id = slugify(inp.name || inp.host); while (CONFIG.providers.some(x => x.id === id)) id += '2';
       CONFIG.providers.push({ id, name: inp.name || inp.host, host: inp.host, username: inp.username, password: inp.password, userAgent: inp.userAgent || undefined });
     }
@@ -609,7 +614,7 @@ const server = http.createServer((req, res) => {
   if (p === '/api/categories') {
     const type = q.get('type'); const action = CAT_ACTIONS[type];
     if (!action) return sendJSON(res, 400, { error: 'bad type' });
-    const kid = q.get('kid') === '1';
+    const kid = isKid(q, req);
     return fetchBuffer(apiUrl(pv, { action }), (e, b) => {
       if (e) return sendJSON(res, 502, { error: 'upstream' });
       if (!kid) return passThroughJSON(res, b);
@@ -623,7 +628,7 @@ const server = http.createServer((req, res) => {
     if (!action) return sendJSON(res, 400, { error: 'bad type' });
     const params = { action };
     if (q.get('category_id')) params.category_id = q.get('category_id');
-    const kid = q.get('kid') === '1';
+    const kid = isKid(q, req);
     return fetchBuffer(apiUrl(pv, params), (e, b) => {
       if (e) return sendJSON(res, 502, { error: 'upstream' });
       if (!kid) return passThroughJSON(res, b);
@@ -645,7 +650,7 @@ const server = http.createServer((req, res) => {
     const type = q.get('type');
     const limit = Math.min(parseInt(q.get('limit') || '60', 10) || 60, 120);
     if (term.length < 2) return sendJSON(res, 200, { ready: true, results: [] });
-    const kid = q.get('kid') === '1';
+    const kid = isKid(q, req);
     const go = () => {
       if (!kid) return runSearch(res, pv, term, type, limit, null);
       const types = type ? [type] : ['vod', 'series', 'live'];
@@ -681,7 +686,7 @@ const server = http.createServer((req, res) => {
   if (p === '/api/top') {
     const type = q.get('type') === 'series' ? 'series' : 'vod';
     const limit = Math.min(parseInt(q.get('limit') || '24', 10) || 24, 60);
-    const kid = q.get('kid') === '1';
+    const kid = isKid(q, req);
     const run = () => getPremiumCats(pv, type, (prem) => getAdultCats(pv, type, (bad) => {
       const arr = (sIndex(pv.id)[type] || [])
         .filter(it => it.icon && it.rating && parseFloat(it.rating) >= 7 && parseFloat(it.rating) <= 9.6 && (prem.size === 0 || prem.has(String(it.cat))))
@@ -703,7 +708,7 @@ const server = http.createServer((req, res) => {
   }
   if (p === '/api/state') {
     const firstProfile = (CONFIG.profiles && CONFIG.profiles[0] && CONFIG.profiles[0].id) || 'eu';
-    const prof = ((q.get('profile') || firstProfile).replace(/[^\w-]/g, '').slice(0, 40)) || firstProfile;
+    const prof = ((q.get('profile') || cookieVal(req, 'fluxo_prof') || firstProfile).replace(/[^\w-]/g, '').slice(0, 40)) || firstProfile;
     // perfil principal fica no arquivo legado (preserva favoritos existentes); outros ganham o seu
     const STATE_FILE = prof === firstProfile ? '/dados/.fluxo-state.json' : `/dados/.fluxo-state-${prof}.json`;
     if (req.method === 'POST') {

@@ -872,6 +872,147 @@ applyLite(store.get('lite', autoLite()));
 $('#lite')?.addEventListener('click', () => applyLite(!document.body.classList.contains('lite')));
 
 /* ---------- start ---------- */
-refreshDL().then(() => { if (Object.values(DL).some(d => d.status === 'downloading')) startDLPolling(); });
-syncSourcesToTab();
-loadState().then(loadTab);   // puxa favoritos/histórico do servidor e então renderiza (sincroniza entre aparelhos)
+/* ===================== perfis + provedores + configurações ===================== */
+let CFG = { providers: [], profiles: [], hasPin: false, defaultPv: '' };
+let PROFILE = null, PV = '', ADMIN_PIN = '';
+const apiPost = (p, body) => fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+const setCookie = (k, v) => { document.cookie = `${k}=${encodeURIComponent(v)};path=/;max-age=31536000;samesite=lax`; };
+const delCookie = (k) => { document.cookie = `${k}=;path=/;max-age=0`; };
+const pdot = (p) => `<span class="pdot" style="background:${p.color || '#7c9cff'}"></span>`;
+
+function applyCookies() {
+  if (PV) setCookie('fluxo_pv', PV);
+  if (PROFILE) { setCookie('fluxo_prof', PROFILE.id); PROFILE.kid ? setCookie('fluxo_kid', '1') : delCookie('fluxo_kid'); }
+}
+async function bootProfiles() {
+  try { CFG = await api('/api/config'); } catch {}
+  const profs = CFG.profiles || [];
+  let prof = profs.find(p => p.id === store.get('profile', null));
+  if (!prof && profs.length <= 1) prof = profs[0];
+  if (!prof) { renderProfilePicker(); return false; }     // vários perfis e nenhum escolhido → mostra seletor
+  setActiveProfile(prof, false);
+  return true;
+}
+function setActiveProfile(prof, reload) {
+  if (!prof) return;
+  PROFILE = prof;
+  const allowed = (prof.providers && prof.providers.length) ? prof.providers : [CFG.defaultPv];
+  let pv = store.get('pv', null);
+  if (!allowed.includes(pv)) pv = allowed[0];
+  PV = pv; store.set('profile', prof.id); store.set('pv', pv);
+  applyCookies(); renderProfileChip(); renderPvSel();
+  if (reload) location.reload();
+}
+function switchProvider(id) {
+  if (!PROFILE || !(PROFILE.providers || []).includes(id)) return;
+  PV = id; store.set('pv', id); setCookie('fluxo_pv', id); location.reload();
+}
+function renderProfileChip() {
+  const b = $('#profbtn'); if (!b || !PROFILE) return;
+  b.textContent = (PROFILE.name || '?').trim()[0].toUpperCase();
+  b.style.background = PROFILE.color || 'var(--panel-2)'; b.style.color = '#0b0b12';
+  b.title = `Perfil: ${PROFILE.name}${PROFILE.kid ? ' (Kids)' : ''} — trocar`;
+}
+function renderPvSel() {
+  const sel = $('#pvsel'); if (!sel || !PROFILE) return;
+  const allowed = (PROFILE.providers || []).map(id => CFG.providers.find(p => p.id === id)).filter(Boolean);
+  if (allowed.length <= 1) { sel.style.display = 'none'; return; }
+  sel.style.display = ''; sel.innerHTML = allowed.map(p => `<option value="${p.id}">📡 ${esc(p.name)}</option>`).join('');
+  sel.value = PV; sel.onchange = () => switchProvider(sel.value);
+}
+function profAvatar(p) { return `<div class="prof-av" style="--c:${p.color || '#7c9cff'}">${esc((p.name || '?').trim()[0].toUpperCase())}</div>${p.kid ? '<span class="kidtag">KIDS</span>' : ''}`; }
+function renderProfilePicker() {
+  const grid = $('#prof-grid');
+  grid.innerHTML = (CFG.profiles || []).map(p => `<button class="prof-card" data-id="${p.id}">${profAvatar(p)}<span>${esc(p.name)}</span></button>`).join('');
+  grid.querySelectorAll('.prof-card').forEach(b => b.onclick = () => setActiveProfile((CFG.profiles || []).find(p => p.id === b.dataset.id), true));
+  $('#profiles').classList.remove('hidden');
+}
+
+/* ---- Configurações ---- */
+async function openSettings() {
+  $('#profiles').classList.add('hidden');
+  $('#settings').classList.remove('hidden');
+  try { CFG = await api('/api/config'); } catch {}
+  if (CFG.hasPin && !ADMIN_PIN) return renderPinGate();
+  renderSettings();
+}
+function renderPinGate() {
+  $('#set-body').innerHTML = `<h1 class="set-h">🔒 Configurações</h1>
+    <p class="set-sub">Digite o PIN para gerenciar provedores e perfis.</p>
+    <div class="set-row"><input id="pin-in" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN" class="set-inp"><button id="pin-ok" class="btn primary">Entrar</button></div>
+    <div id="pin-err" class="set-err"></div>`;
+  const go = async () => { let r = {}; try { r = await apiPost('/api/admin/auth', { pin: $('#pin-in').value }); } catch {} if (r.ok) { ADMIN_PIN = $('#pin-in').value; renderSettings(); } else $('#pin-err').textContent = 'PIN incorreto.'; };
+  $('#pin-ok').onclick = go; $('#pin-in').onkeydown = e => { if (e.key === 'Enter') go(); }; $('#pin-in').focus();
+}
+function renderSettings() {
+  const provs = CFG.providers || [], profs = CFG.profiles || [];
+  $('#set-body').innerHTML = `
+    <h1 class="set-h">⚙ Configurações</h1>
+    <section class="set-sec"><div class="set-sec-h">📡 Provedores</div><div id="set-provs"></div><button class="btn ghost" id="add-prov">+ Novo provedor</button></section>
+    <section class="set-sec"><div class="set-sec-h">👤 Perfis</div><div id="set-profs"></div><button class="btn ghost" id="add-prof">+ Novo perfil</button></section>
+    <section class="set-sec"><div class="set-sec-h">🔒 PIN de acesso</div>
+      <p class="set-sub">${CFG.hasPin ? 'Há um PIN definido. Deixe em branco e salve pra remover.' : 'Sem PIN — qualquer um nesta rede abre as Configurações.'}</p>
+      <div class="set-row"><input id="newpin" type="password" inputmode="numeric" autocomplete="new-password" placeholder="${CFG.hasPin ? 'Novo PIN' : 'Definir PIN'}" class="set-inp"><button class="btn" id="save-pin">Salvar PIN</button></div></section>`;
+  $('#set-provs').innerHTML = provs.map(p => `<div class="set-item"><div><b>${esc(p.name)}</b><span class="set-dim"> · ${esc(p.host)}</span></div><div class="set-item-act"><button class="icbtn" data-ep="${p.id}" title="Editar">✎</button><button class="icbtn" data-dp="${p.id}" title="Remover">🗑</button></div></div>`).join('') || '<div class="set-dim">nenhum</div>';
+  $('#set-profs').innerHTML = profs.map(p => `<div class="set-item"><div>${pdot(p)}<b>${esc(p.name)}</b>${p.kid ? '<span class="kidbadge">KIDS</span>' : ''}<span class="set-dim"> · ${(p.providers || []).length} prov.</span></div><div class="set-item-act"><button class="icbtn" data-ef="${p.id}">✎</button><button class="icbtn" data-df="${p.id}">🗑</button></div></div>`).join('');
+  $('#add-prov').onclick = () => provForm(null);
+  $('#add-prof').onclick = () => profForm(null);
+  $('#save-pin').onclick = savePin;
+  $('#set-provs').querySelectorAll('[data-ep]').forEach(b => b.onclick = () => provForm(provs.find(x => x.id === b.dataset.ep)));
+  $('#set-provs').querySelectorAll('[data-dp]').forEach(b => b.onclick = () => delItem('provider', b.dataset.dp, 'Remover este provedor?'));
+  $('#set-profs').querySelectorAll('[data-ef]').forEach(b => b.onclick = () => profForm(profs.find(x => x.id === b.dataset.ef)));
+  $('#set-profs').querySelectorAll('[data-df]').forEach(b => b.onclick = () => delItem('profile', b.dataset.df, 'Remover este perfil?'));
+}
+function provForm(p) {
+  const ed = !!p;
+  $('#set-body').innerHTML = `<button class="set-back" id="back">← voltar</button><h1 class="set-h">${ed ? 'Editar' : 'Novo'} provedor</h1>
+    <label class="set-lbl">Nome<input id="f-name" class="set-inp" value="${ed ? esc(p.name) : ''}" placeholder="ex: Pai20"></label>
+    <label class="set-lbl">Host<input id="f-host" class="set-inp" value="${ed ? esc(p.host) : ''}" placeholder="ex: meuprovedor.com"></label>
+    <label class="set-lbl">Usuário<input id="f-user" class="set-inp" autocomplete="off" placeholder="${ed ? '(em branco mantém o atual)' : 'usuário do painel'}"></label>
+    <label class="set-lbl">Senha<input id="f-pass" class="set-inp" type="password" autocomplete="off" placeholder="${ed ? '(em branco mantém a atual)' : 'senha do painel'}"></label>
+    <div class="set-row"><button class="btn" id="f-test">Testar conexão</button><span id="f-testr" class="set-dim"></span></div>
+    <div class="set-row"><button class="btn primary" id="f-save">Salvar</button></div><div id="f-err" class="set-err"></div>`;
+  $('#back').onclick = renderSettings;
+  const payload = () => ({ pin: ADMIN_PIN, provider: { id: ed ? p.id : undefined, name: $('#f-name').value.trim(), host: $('#f-host').value.trim().replace(/^https?:\/\//, '').replace(/\/+$/, ''), username: $('#f-user').value, password: $('#f-pass').value } });
+  $('#f-test').onclick = async () => { $('#f-testr').textContent = 'testando…'; let r = {}; try { r = await apiPost('/api/admin/provider/test', payload()); } catch {} $('#f-testr').textContent = r.ok ? `✓ ativo${r.exp ? ' · expira ' + new Date(r.exp * 1000).toLocaleDateString('pt-BR') : ''}` : ('✗ ' + (r.error || 'falhou')); };
+  $('#f-save').onclick = async () => { let r = {}; try { r = await apiPost('/api/admin/provider', payload()); } catch {} if (r.ok) { CFG = await api('/api/config'); toast('Provedor salvo'); renderSettings(); } else $('#f-err').textContent = r.error || 'erro ao salvar'; };
+}
+function profForm(p) {
+  const ed = !!p, provs = CFG.providers || [], sel = (p && p.providers) || [];
+  const COLORS = ['#7c9cff', '#5ad1a5', '#ff9f6e', '#e06ec1', '#ffd36e', '#8f7cff'];
+  let color = (p && p.color) || '#7c9cff';
+  $('#set-body').innerHTML = `<button class="set-back" id="back">← voltar</button><h1 class="set-h">${ed ? 'Editar' : 'Novo'} perfil</h1>
+    <label class="set-lbl">Nome<input id="p-name" class="set-inp" value="${ed ? esc(p.name) : ''}" placeholder="ex: Davi"></label>
+    <label class="set-check"><input type="checkbox" id="p-kid" ${p && p.kid ? 'checked' : ''}> <span>Perfil <b>Kids</b> — esconde conteúdo adulto</span></label>
+    <div class="set-lbl">Cor<div class="color-row" id="p-colors">${COLORS.map(c => `<button class="color-dot${color === c ? ' on' : ''}" data-c="${c}" style="background:${c}"></button>`).join('')}</div></div>
+    <div class="set-lbl">Provedores deste perfil<div id="p-provs" class="p-provs">${provs.map(pr => `<label class="set-check"><input type="checkbox" value="${pr.id}" ${sel.includes(pr.id) || (!ed && provs[0] && provs[0].id === pr.id) ? 'checked' : ''}> ${esc(pr.name)}</label>`).join('')}</div></div>
+    <div class="set-row"><button class="btn primary" id="p-save">Salvar</button></div><div id="p-err" class="set-err"></div>`;
+  $('#back').onclick = renderSettings;
+  $('#p-colors').querySelectorAll('.color-dot').forEach(b => b.onclick = () => { color = b.dataset.c; $('#p-colors').querySelectorAll('.color-dot').forEach(x => x.classList.toggle('on', x === b)); });
+  $('#p-save').onclick = async () => {
+    const providers = [...$('#p-provs').querySelectorAll('input:checked')].map(x => x.value);
+    const body = { pin: ADMIN_PIN, profile: { id: ed ? p.id : undefined, name: $('#p-name').value.trim(), kid: $('#p-kid').checked, providers, color } };
+    let r = {}; try { r = await apiPost('/api/admin/profile', body); } catch {} if (r.ok) { CFG = await api('/api/config'); toast('Perfil salvo'); renderSettings(); } else $('#p-err').textContent = r.error || 'erro ao salvar';
+  };
+}
+async function delItem(kind, id, msg) {
+  if (!confirm(msg)) return;
+  let r = {}; try { r = await apiPost(`/api/admin/${kind}/delete`, { pin: ADMIN_PIN, id }); } catch {}
+  if (r.ok) { CFG = await api('/api/config'); renderSettings(); } else toast(r.error || 'erro');
+}
+async function savePin() {
+  const np = $('#newpin').value; let r = {}; try { r = await apiPost('/api/admin/pin', { pin: ADMIN_PIN, newPin: np }); } catch {}
+  if (r.ok) { ADMIN_PIN = np; CFG = await api('/api/config'); toast('PIN salvo'); renderSettings(); } else toast('erro ao salvar PIN');
+}
+$('#profbtn')?.addEventListener('click', renderProfilePicker);
+$('#setbtn')?.addEventListener('click', openSettings);
+$('#prof-manage')?.addEventListener('click', openSettings);
+$('[data-close-set]')?.addEventListener('click', () => $('#settings').classList.add('hidden'));
+
+/* ---------- start ---------- */
+bootProfiles().then(ok => {
+  if (!ok) return;                           // seletor de perfil aberto; segue após escolher (reload)
+  refreshDL().then(() => { if (Object.values(DL).some(d => d.status === 'downloading')) startDLPolling(); });
+  syncSourcesToTab();
+  loadState().then(loadTab);                 // favoritos/histórico do perfil + catálogo do provedor ativo
+});
