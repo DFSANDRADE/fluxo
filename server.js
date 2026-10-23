@@ -28,7 +28,30 @@ function loadProviders() {
   raw.forEach(p => { if (p && p.host) PROVIDERS[p.id] = { id: p.id, name: p.name || p.id, host: p.host, username: p.username, password: p.password, ua: p.userAgent || UA, base: `http://${p.host}` }; });
   DEFAULT_PV = (raw[0] && raw[0].id) || 'principal';
 }
+function saveConfig() { try { fs.writeFileSync(CONFIG_PATH, JSON.stringify(CONFIG, null, 2)); } catch (e) { console.log('erro ao salvar config:', e.message); } }
+// migra o formato antigo pro novo (lista de provedores + perfis), gravando em disco 1x
+function migrateConfig() {
+  let changed = false;
+  if (!Array.isArray(CONFIG.providers) || !CONFIG.providers.length) {
+    const old = CONFIG.provider || {};
+    CONFIG.providers = [{ id: 'principal', name: 'Principal', host: old.host, username: old.username, password: old.password, userAgent: old.userAgent || CONFIG.userAgent }];
+    delete CONFIG.provider;
+    changed = true;
+  }
+  if (!Array.isArray(CONFIG.profiles) || !CONFIG.profiles.length) {
+    CONFIG.profiles = [{ id: 'eu', name: 'Eu', kid: false, providers: CONFIG.providers.map(p => p.id), color: '#7c9cff' }];
+    changed = true;
+  }
+  if (changed) saveConfig();
+}
+migrateConfig();
 loadProviders();
+const pinOk = (given) => !CONFIG.adminPin || String(given || '') === String(CONFIG.adminPin);
+const slugify = (s) => String(s || '').normalize('NFD').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || ('pv' + Date.now());
+function readJSON(req, cb) {   // lê corpo POST como JSON (limite 1MB)
+  let body = ''; req.on('data', c => { body += c; if (body.length > 1e6) req.destroy(); });
+  req.on('end', () => { try { cb(JSON.parse(body || '{}')); } catch { cb(null); } });
+}
 const getPv = (id) => PROVIDERS[id] || PROVIDERS[DEFAULT_PV];
 function pvOf(q, req) {                       // provedor da requisição: ?pv= ou cookie fluxo_pv, senão o padrão
   let id = q && q.get('pv');
@@ -397,6 +420,19 @@ function getPremiumCats(pv, type, cb) {
   });
 }
 
+// categorias adultas (pro filtro do perfil Kid)
+const ADULT_RE = /(adult[oa]s?|\bxxx\b|porn|er[óo]tic|\bsex\b|sexy|\bhot\b|\+\s?18|18\s?\+|playboy|brazzers)/i;
+const adultCats = {};   // "pvId:type" -> { set, at }
+function getAdultCats(pv, type, cb) {
+  const k = pv.id + ':' + type; const c = adultCats[k];
+  if (c && Date.now() - c.at < 3600000) return cb(c.set);
+  fetchBuffer(apiUrl(pv, { action: CAT_ACTIONS[type] }), (e, b) => {
+    const set = new Set();
+    if (!e) { try { const a = JSON.parse(b.toString()); if (Array.isArray(a)) a.forEach(cc => { if (ADULT_RE.test(cc.category_name)) set.add(String(cc.category_id)); }); } catch {} }
+    adultCats[k] = { set, at: Date.now() }; cb(set);
+  });
+}
+
 // ---- índice de busca: catálogo inteiro em memória (nomes normalizados) ----
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const INDEX_TTL = 6 * 3600 * 1000;
@@ -427,11 +463,12 @@ function buildIndex(pv) {
   return BUILDING[pv.id];
 }
 
-function runSearch(res, pv, q, type, limit) {
+function runSearch(res, pv, q, type, limit, badCats) {
   const S = sIndex(pv.id);
   const types = type && S[type] ? [type] : ['vod', 'series', 'live'];
   const hits = [];
   for (const t of types) for (const it of S[t]) {
+    if (badCats && (badCats.has(String(it.cat)) || ADULT_RE.test(it.name || ''))) continue;   // perfil Kid
     if (it._n.includes(q)) { hits.push(it); if (hits.length >= limit * 3) break; }
   }
   hits.sort((a, b) => (b._n.startsWith(q) ? 1 : 0) - (a._n.startsWith(q) ? 1 : 0));
@@ -496,17 +533,106 @@ const server = http.createServer((req, res) => {
   const q = u.searchParams;
   const pv = pvOf(q, req);              // provedor desta requisição (?pv= ou cookie, senão o padrão)
 
+  // ---- configuração pública (SEM segredos: nunca devolve usuário/senha) ----
+  if (p === '/api/config') {
+    return sendJSON(res, 200, {
+      providers: (CONFIG.providers || []).map(x => ({ id: x.id, name: x.name, host: x.host })),
+      profiles: CONFIG.profiles || [],
+      hasPin: !!CONFIG.adminPin,
+      defaultPv: DEFAULT_PV
+    });
+  }
+  // ---- admin (tudo protegido por PIN quando houver) ----
+  if (p === '/api/admin/auth') return readJSON(req, d => sendJSON(res, 200, { ok: pinOk(d && d.pin) }));
+  if (p === '/api/admin/provider') return readJSON(req, d => {
+    if (!d || !pinOk(d.pin)) return sendJSON(res, 403, { error: 'pin' });
+    const inp = d.provider || {};
+    if (!inp.host || !inp.username || !inp.password) return sendJSON(res, 400, { error: 'faltam host/usuário/senha' });
+    CONFIG.providers = CONFIG.providers || [];
+    let id = inp.id;
+    if (id && CONFIG.providers.some(x => x.id === id)) {
+      Object.assign(CONFIG.providers.find(x => x.id === id), { name: inp.name || inp.host, host: inp.host, username: inp.username, password: inp.password, userAgent: inp.userAgent || undefined });
+    } else {
+      id = slugify(inp.name || inp.host); while (CONFIG.providers.some(x => x.id === id)) id += '2';
+      CONFIG.providers.push({ id, name: inp.name || inp.host, host: inp.host, username: inp.username, password: inp.password, userAgent: inp.userAgent || undefined });
+    }
+    saveConfig(); loadProviders();
+    delete SEARCHES[id]; delete EPGS[id];   // novas credenciais -> reconstrói índice/EPG
+    sendJSON(res, 200, { ok: true, id });
+  });
+  if (p === '/api/admin/provider/delete') return readJSON(req, d => {
+    if (!d || !pinOk(d.pin)) return sendJSON(res, 403, { error: 'pin' });
+    if ((CONFIG.providers || []).length <= 1) return sendJSON(res, 400, { error: 'precisa de ao menos 1 provedor' });
+    CONFIG.providers = CONFIG.providers.filter(x => x.id !== d.id);
+    (CONFIG.profiles || []).forEach(pf => { pf.providers = (pf.providers || []).filter(x => x !== d.id); if (!pf.providers.length) pf.providers = [CONFIG.providers[0].id]; });
+    saveConfig(); loadProviders(); sendJSON(res, 200, { ok: true });
+  });
+  if (p === '/api/admin/provider/test') return readJSON(req, d => {
+    if (!d || !pinOk(d.pin)) return sendJSON(res, 403, { error: 'pin' });
+    const inp = d.provider || {};
+    if (!inp.host) return sendJSON(res, 400, { ok: false, error: 'sem host' });
+    const tpv = { base: `http://${inp.host}`, username: inp.username, password: inp.password };
+    fetchBuffer(apiUrl(tpv, {}), (e, b) => {
+      if (e) return sendJSON(res, 200, { ok: false, error: 'não respondeu' });
+      try { const ui = (JSON.parse(b.toString()).user_info) || {}; sendJSON(res, 200, { ok: ui.auth === 1 || ui.status === 'Active', status: ui.status, exp: ui.exp_date, active: ui.active_cons, max: ui.max_connections }); }
+      catch { sendJSON(res, 200, { ok: false, error: 'resposta inválida' }); }
+    }, 12000);
+  });
+  if (p === '/api/admin/profile') return readJSON(req, d => {
+    if (!d || !pinOk(d.pin)) return sendJSON(res, 403, { error: 'pin' });
+    const inp = d.profile || {};
+    if (!inp.name) return sendJSON(res, 400, { error: 'sem nome' });
+    const provs = (inp.providers && inp.providers.length ? inp.providers : [DEFAULT_PV]).filter(x => PROVIDERS[x]);
+    CONFIG.profiles = CONFIG.profiles || [];
+    let id = inp.id;
+    if (id && CONFIG.profiles.some(x => x.id === id)) {
+      Object.assign(CONFIG.profiles.find(x => x.id === id), { name: inp.name, kid: !!inp.kid, providers: provs.length ? provs : [DEFAULT_PV], color: inp.color || '#7c9cff' });
+    } else {
+      id = slugify(inp.name); while (CONFIG.profiles.some(x => x.id === id)) id += '2';
+      CONFIG.profiles.push({ id, name: inp.name, kid: !!inp.kid, providers: provs.length ? provs : [DEFAULT_PV], color: inp.color || '#7c9cff' });
+    }
+    saveConfig(); sendJSON(res, 200, { ok: true, id });
+  });
+  if (p === '/api/admin/profile/delete') return readJSON(req, d => {
+    if (!d || !pinOk(d.pin)) return sendJSON(res, 403, { error: 'pin' });
+    if ((CONFIG.profiles || []).length <= 1) return sendJSON(res, 400, { error: 'precisa de ao menos 1 perfil' });
+    CONFIG.profiles = CONFIG.profiles.filter(x => x.id !== d.id);
+    saveConfig(); sendJSON(res, 200, { ok: true });
+  });
+  if (p === '/api/admin/pin') return readJSON(req, d => {
+    if (!d || !pinOk(d.pin)) return sendJSON(res, 403, { error: 'pin' });
+    const np = (d.newPin || '').toString().trim();
+    if (np) CONFIG.adminPin = np; else delete CONFIG.adminPin;
+    saveConfig(); sendJSON(res, 200, { ok: true });
+  });
+
   if (p === '/api/categories') {
-    const action = CAT_ACTIONS[q.get('type')];
+    const type = q.get('type'); const action = CAT_ACTIONS[type];
     if (!action) return sendJSON(res, 400, { error: 'bad type' });
-    return fetchBuffer(apiUrl(pv, { action }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
+    const kid = q.get('kid') === '1';
+    return fetchBuffer(apiUrl(pv, { action }), (e, b) => {
+      if (e) return sendJSON(res, 502, { error: 'upstream' });
+      if (!kid) return passThroughJSON(res, b);
+      let a = []; try { a = JSON.parse(b.toString()); } catch {}
+      if (Array.isArray(a)) a = a.filter(c => !ADULT_RE.test(c.category_name));   // perfil Kid: sem categorias adultas
+      sendJSON(res, 200, a);
+    });
   }
   if (p === '/api/streams') {
-    const action = STREAM_ACTIONS[q.get('type')];
+    const type = q.get('type'); const action = STREAM_ACTIONS[type];
     if (!action) return sendJSON(res, 400, { error: 'bad type' });
     const params = { action };
     if (q.get('category_id')) params.category_id = q.get('category_id');
-    return fetchBuffer(apiUrl(pv, params), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
+    const kid = q.get('kid') === '1';
+    return fetchBuffer(apiUrl(pv, params), (e, b) => {
+      if (e) return sendJSON(res, 502, { error: 'upstream' });
+      if (!kid) return passThroughJSON(res, b);
+      getAdultCats(pv, type, (bad) => {                                          // perfil Kid: tira itens de categoria adulta
+        let a = []; try { a = JSON.parse(b.toString()); } catch {}
+        if (Array.isArray(a)) a = a.filter(it => !bad.has(String(it.category_id)) && !ADULT_RE.test(it.name || ''));
+        sendJSON(res, 200, a);
+      });
+    });
   }
   if (p === '/api/vod') {
     return fetchBuffer(apiUrl(pv, { action: 'get_vod_info', vod_id: q.get('id') || '' }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
@@ -519,9 +645,16 @@ const server = http.createServer((req, res) => {
     const type = q.get('type');
     const limit = Math.min(parseInt(q.get('limit') || '60', 10) || 60, 120);
     if (term.length < 2) return sendJSON(res, 200, { ready: true, results: [] });
+    const kid = q.get('kid') === '1';
+    const go = () => {
+      if (!kid) return runSearch(res, pv, term, type, limit, null);
+      const types = type ? [type] : ['vod', 'series', 'live'];
+      let left = types.length; const bad = new Set();
+      types.forEach(t => getAdultCats(pv, t, s => { s.forEach(x => bad.add(x)); if (--left === 0) runSearch(res, pv, term, type, limit, bad); }));
+    };
     const S = sIndex(pv.id);
-    if (S.at && Date.now() - S.at < INDEX_TTL) return runSearch(res, pv, term, type, limit);
-    return buildIndex(pv).then(() => runSearch(res, pv, term, type, limit)).catch(() => sendJSON(res, 200, { ready: false, results: [] }));
+    if (S.at && Date.now() - S.at < INDEX_TTL) return go();
+    return buildIndex(pv).then(go).catch(() => sendJSON(res, 200, { ready: false, results: [] }));
   }
   if (p === '/api/download') {
     const rec = startDownload({ type: q.get('type') || 'movie', id: q.get('id'), ext: q.get('ext'), name: q.get('name'), icon: q.get('icon'), pv });
@@ -548,13 +681,15 @@ const server = http.createServer((req, res) => {
   if (p === '/api/top') {
     const type = q.get('type') === 'series' ? 'series' : 'vod';
     const limit = Math.min(parseInt(q.get('limit') || '24', 10) || 24, 60);
-    const run = () => getPremiumCats(pv, type, (prem) => {
+    const kid = q.get('kid') === '1';
+    const run = () => getPremiumCats(pv, type, (prem) => getAdultCats(pv, type, (bad) => {
       const arr = (sIndex(pv.id)[type] || [])
         .filter(it => it.icon && it.rating && parseFloat(it.rating) >= 7 && parseFloat(it.rating) <= 9.6 && (prem.size === 0 || prem.has(String(it.cat))))
+        .filter(it => !kid || (!bad.has(String(it.cat)) && !ADULT_RE.test(it.name || '')))
         .sort((a, b) => parseFloat(b.rating) - parseFloat(a.rating))
         .slice(0, limit).map(({ _n, ...r }) => r);
       sendJSON(res, 200, { results: arr });
-    });
+    }));
     if (sIndex(pv.id).at) return run();
     return buildIndex(pv).then(run);
   }
@@ -567,7 +702,10 @@ const server = http.createServer((req, res) => {
     return serveLocal(req, res, abs);
   }
   if (p === '/api/state') {
-    const STATE_FILE = '/dados/.fluxo-state.json';
+    const firstProfile = (CONFIG.profiles && CONFIG.profiles[0] && CONFIG.profiles[0].id) || 'eu';
+    const prof = ((q.get('profile') || firstProfile).replace(/[^\w-]/g, '').slice(0, 40)) || firstProfile;
+    // perfil principal fica no arquivo legado (preserva favoritos existentes); outros ganham o seu
+    const STATE_FILE = prof === firstProfile ? '/dados/.fluxo-state.json' : `/dados/.fluxo-state-${prof}.json`;
     if (req.method === 'POST') {
       let body = ''; req.on('data', c => { body += c; if (body.length > 4e6) req.destroy(); });
       req.on('end', () => { try { JSON.parse(body); fs.writeFileSync(STATE_FILE, body); } catch {} sendJSON(res, 200, { ok: true }); });
