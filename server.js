@@ -13,11 +13,28 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { URL, URLSearchParams } = require('url');
 
-const CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
-const { host, username, password } = CONFIG.provider;
+const CONFIG_PATH = path.join(__dirname, 'config.json');
+let CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 const UA = CONFIG.userAgent || 'okhttp/4.9';
 const PORT = CONFIG.port || 8085;
-const BASE = `http://${host}`;
+
+// ---- provedores: lista de provedores; resolvido por requisição (migra do formato antigo { provider }) ----
+let PROVIDERS = {}, DEFAULT_PV = 'principal';
+function loadProviders() {
+  const raw = (CONFIG.providers && CONFIG.providers.length)
+    ? CONFIG.providers
+    : [Object.assign({ id: 'principal', name: 'Principal' }, CONFIG.provider || {})];
+  PROVIDERS = {};
+  raw.forEach(p => { if (p && p.host) PROVIDERS[p.id] = { id: p.id, name: p.name || p.id, host: p.host, username: p.username, password: p.password, ua: p.userAgent || UA, base: `http://${p.host}` }; });
+  DEFAULT_PV = (raw[0] && raw[0].id) || 'principal';
+}
+loadProviders();
+const getPv = (id) => PROVIDERS[id] || PROVIDERS[DEFAULT_PV];
+function pvOf(q, req) {                       // provedor da requisição: ?pv= ou cookie fluxo_pv, senão o padrão
+  let id = q && q.get('pv');
+  if (!id && req) { const m = /(?:^|;\s*)fluxo_pv=([^;]+)/.exec(req.headers.cookie || ''); if (m) { try { id = decodeURIComponent(m[1]); } catch { id = m[1]; } } }
+  return getPv(id);
+}
 const JK = CONFIG.jackett || null;
 const TM = CONFIG.transmission || { host: '127.0.0.1', port: 9091 };
 const TORRENT_DIR = CONFIG.torrentDir || '/dados/midia/torrents';
@@ -176,8 +193,8 @@ function serveHls(res, upstreamUrl) {
   });
 }
 
-const apiUrl = (params) =>
-  `${BASE}/player_api.php?${new URLSearchParams(Object.assign({ username, password }, params))}`;
+const apiUrl = (pv, params) =>
+  `${pv.base}/player_api.php?${new URLSearchParams(Object.assign({ username: pv.username, password: pv.password }, params))}`;
 
 function sendJSON(res, code, obj) {
   const body = Buffer.from(JSON.stringify(obj));
@@ -226,7 +243,8 @@ function loadDLIndex() {
     }
   } catch {}
 }
-function startDownload({ type, id, ext, name, icon }) {
+function startDownload({ type, id, ext, name, icon, pv }) {
+  pv = pv || getPv(DEFAULT_PV);
   const key = dlKey(type, id);
   if (DOWNLOADS[key] && DOWNLOADS[key].status !== 'error') return DOWNLOADS[key];
   ext = (ext || 'mp4').replace(/[^a-z0-9]/gi, '') || 'mp4';
@@ -235,7 +253,7 @@ function startDownload({ type, id, ext, name, icon }) {
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   const abs = path.join(dir, `${sanitize(name)}.${ext}`);
   const rec = DOWNLOADS[key] = { key, type, id, ext, name, icon, file: abs, status: 'downloading', received: 0, total: 0, at: Date.now() };
-  const url = `${BASE}/${type === 'series' ? 'series' : 'movie'}/${username}/${password}/${id}.${ext}`;
+  const url = `${pv.base}/${type === 'series' ? 'series' : 'movie'}/${pv.username}/${pv.password}/${id}.${ext}`;
   openUpstream(url, {}, (err, up) => {
     if (err) { rec.status = 'error'; saveDLIndex(); return; }
     rec.total = parseInt(up.headers['content-length'] || '0', 10) || 0;
@@ -336,11 +354,13 @@ function warmOne(url, cb) {
     fetchBuffer(u, (e, buf) => { if (!e && buf && buf.length) fs.writeFile(file, buf, cb); else cb(); }, 6000);
   });
 }
-async function warmCache() {
+async function warmCache(pv) {
+  pv = pv || getPv(DEFAULT_PV);
   if (warmState.running) return;
-  if (!SEARCH.at) await buildIndex();
+  if (!sIndex(pv.id).at) await buildIndex(pv);
+  const S = sIndex(pv.id);
   const urls = new Set();
-  for (const t of ['vod', 'series', 'live']) for (const it of SEARCH[t]) if (it.icon) urls.add(it.icon);
+  for (const t of ['vod', 'series', 'live']) for (const it of S[t]) if (it.icon) urls.add(it.icon);
   const list = [...urls];
   warmState = { running: true, total: list.length, done: 0, at: Date.now() };
   let i = 0;
@@ -366,48 +386,52 @@ const STREAM_ACTIONS = { live: 'get_live_streams', vod: 'get_vod_streams', serie
 
 // categorias "premium" (reconhecíveis) pro Destaque / top avaliados
 const PREMIUM_RE = /cinema|lan[çc]amento|4k|uhd|netflix|marvel|disney|hbo|\bmax\b|prime|apple|paramount|star|dc\b|destaque|cl[áa]ssico|top/i;
-const premiumCats = { vod: null, series: null, at: 0 };
-function getPremiumCats(type, cb) {
-  if (premiumCats[type] && Date.now() - premiumCats.at < 3600000) return cb(premiumCats[type]);
-  fetchBuffer(apiUrl({ action: CAT_ACTIONS[type] }), (e, b) => {
+const premiumCats = {};   // "pvId:type" -> { set, at }
+function getPremiumCats(pv, type, cb) {
+  const k = pv.id + ':' + type; const c = premiumCats[k];
+  if (c && Date.now() - c.at < 3600000) return cb(c.set);
+  fetchBuffer(apiUrl(pv, { action: CAT_ACTIONS[type] }), (e, b) => {
     const set = new Set();
     if (!e) { try { const a = JSON.parse(b.toString()); if (Array.isArray(a)) a.forEach(c => { if (PREMIUM_RE.test(c.category_name)) set.add(String(c.category_id)); }); } catch {} }
-    premiumCats[type] = set; premiumCats.at = Date.now(); cb(set);
+    premiumCats[k] = { set, at: Date.now() }; cb(set);
   });
 }
 
 // ---- índice de busca: catálogo inteiro em memória (nomes normalizados) ----
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const INDEX_TTL = 6 * 3600 * 1000;
-let SEARCH = { live: [], vod: [], series: [], at: 0 };
-let building = null;
+const SEARCHES = {};   // pvId -> { live, vod, series, at }  (índice por provedor)
+const BUILDING = {};   // pvId -> promise
+function sIndex(pvId) { return SEARCHES[pvId] || (SEARCHES[pvId] = { live: [], vod: [], series: [], at: 0 }); }
 
 const minItem = (it, t) => ({
   t, id: it.stream_id ?? it.series_id, name: it.name, icon: it.stream_icon || it.cover,
   rating: it.rating, ext: it.container_extension, cat: it.category_id, _n: norm(it.name)
 });
 
-function buildIndex() {
-  if (building) return building;
-  building = (async () => {
+function buildIndex(pv) {
+  pv = pv || getPv(DEFAULT_PV);
+  if (BUILDING[pv.id]) return BUILDING[pv.id];
+  BUILDING[pv.id] = (async () => {
     const out = { live: [], vod: [], series: [], at: Date.now() };
     await Promise.all(['live', 'vod', 'series'].map((t) => new Promise((resolve) => {
-      fetchBuffer(apiUrl({ action: STREAM_ACTIONS[t] }), (e, b) => {
+      fetchBuffer(apiUrl(pv, { action: STREAM_ACTIONS[t] }), (e, b) => {
         if (!e) { try { const a = JSON.parse(b.toString()); if (Array.isArray(a)) out[t] = a.map((x) => minItem(x, t)); } catch {} }
         resolve();
       });
     })));
-    SEARCH = out; building = null;
-    console.log(`Índice pronto: ${out.vod.length} filmes, ${out.series.length} séries, ${out.live.length} canais`);
+    SEARCHES[pv.id] = out; BUILDING[pv.id] = null;
+    console.log(`Índice[${pv.id}] pronto: ${out.vod.length} filmes, ${out.series.length} séries, ${out.live.length} canais`);
     return out;
   })();
-  return building;
+  return BUILDING[pv.id];
 }
 
-function runSearch(res, q, type, limit) {
-  const types = type && SEARCH[type] ? [type] : ['vod', 'series', 'live'];
+function runSearch(res, pv, q, type, limit) {
+  const S = sIndex(pv.id);
+  const types = type && S[type] ? [type] : ['vod', 'series', 'live'];
   const hits = [];
-  for (const t of types) for (const it of SEARCH[t]) {
+  for (const t of types) for (const it of S[t]) {
     if (it._n.includes(q)) { hits.push(it); if (hits.length >= limit * 3) break; }
   }
   hits.sort((a, b) => (b._n.startsWith(q) ? 1 : 0) - (a._n.startsWith(q) ? 1 : 0));
@@ -415,8 +439,9 @@ function runSearch(res, q, type, limit) {
 }
 
 // ---- EPG (guia): parseia o XMLTV do provedor e guarda agora/depois por canal ----
-let EPG = { at: 0, byCh: {} };
-let epgBuilding = null;
+const EPGS = {};           // pvId -> { at, byCh }
+const EPG_BUILDING = {};   // pvId -> promise
+function eIndex(pvId) { return EPGS[pvId] || (EPGS[pvId] = { at: 0, byCh: {} }); }
 const decodeEnt = (s) => String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
 function parseXmltvTime(s) {
   const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{4})?/.exec(s || '');
@@ -425,11 +450,12 @@ function parseXmltvTime(s) {
   if (m[7]) { const sign = m[7][0] === '-' ? 1 : -1; t += sign * ((+m[7].slice(1, 3)) * 60 + (+m[7].slice(3, 5))) * 60000; }
   return t;
 }
-function buildEPG() {
-  if (epgBuilding) return epgBuilding;
-  epgBuilding = new Promise((resolve) => {
-    fetchBuffer(`${BASE}/xmltv.php?username=${username}&password=${password}`, (e, b) => {
-      if (e) { epgBuilding = null; return resolve(EPG); }
+function buildEPG(pv) {
+  pv = pv || getPv(DEFAULT_PV);
+  if (EPG_BUILDING[pv.id]) return EPG_BUILDING[pv.id];
+  EPG_BUILDING[pv.id] = new Promise((resolve) => {
+    fetchBuffer(`${pv.base}/xmltv.php?username=${pv.username}&password=${pv.password}`, (e, b) => {
+      if (e) { EPG_BUILDING[pv.id] = null; return resolve(eIndex(pv.id)); }
       const xml = b.toString('utf8'); const byCh = {};
       const re = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/g;
       let m;
@@ -446,16 +472,16 @@ function buildEPG() {
         (byCh[decodeEnt(chM[1])] || (byCh[decodeEnt(chM[1])] = [])).push({ s, e, t: tt ? decodeEnt(tt[1].trim()) : '' });
       }
       for (const ch in byCh) byCh[ch].sort((a, b) => a.s - b.s);
-      EPG = { at: Date.now(), byCh }; epgBuilding = null;
-      console.log(`EPG pronto: ${Object.keys(byCh).length} canais`);
-      resolve(EPG);
+      EPGS[pv.id] = { at: Date.now(), byCh }; EPG_BUILDING[pv.id] = null;
+      console.log(`EPG[${pv.id}] pronto: ${Object.keys(byCh).length} canais`);
+      resolve(EPGS[pv.id]);
     });
   });
-  return epgBuilding;
+  return EPG_BUILDING[pv.id];
 }
-const ensureEPG = () => (EPG.at && Date.now() - EPG.at < 2 * 3600 * 1000) ? Promise.resolve(EPG) : buildEPG();
-function epgFor(ch, now) {
-  const list = EPG.byCh[ch]; if (!list) return { now: null, upcoming: [] };
+const ensureEPG = (pv) => { const c = eIndex(pv.id); return (c.at && Date.now() - c.at < 2 * 3600 * 1000) ? Promise.resolve(c) : buildEPG(pv); };
+function epgFor(pvId, ch, now) {
+  const list = eIndex(pvId).byCh[ch]; if (!list) return { now: null, upcoming: [] };
   let cur = null, nextIdx = list.length;
   for (let i = 0; i < list.length; i++) {
     if (list[i].s <= now && now < list[i].e) { cur = list[i]; nextIdx = i + 1; break; }
@@ -468,35 +494,37 @@ const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
   const p = u.pathname;
   const q = u.searchParams;
+  const pv = pvOf(q, req);              // provedor desta requisição (?pv= ou cookie, senão o padrão)
 
   if (p === '/api/categories') {
     const action = CAT_ACTIONS[q.get('type')];
     if (!action) return sendJSON(res, 400, { error: 'bad type' });
-    return fetchBuffer(apiUrl({ action }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
+    return fetchBuffer(apiUrl(pv, { action }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
   }
   if (p === '/api/streams') {
     const action = STREAM_ACTIONS[q.get('type')];
     if (!action) return sendJSON(res, 400, { error: 'bad type' });
     const params = { action };
     if (q.get('category_id')) params.category_id = q.get('category_id');
-    return fetchBuffer(apiUrl(params), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
+    return fetchBuffer(apiUrl(pv, params), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
   }
   if (p === '/api/vod') {
-    return fetchBuffer(apiUrl({ action: 'get_vod_info', vod_id: q.get('id') || '' }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
+    return fetchBuffer(apiUrl(pv, { action: 'get_vod_info', vod_id: q.get('id') || '' }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
   }
   if (p === '/api/series') {
-    return fetchBuffer(apiUrl({ action: 'get_series_info', series_id: q.get('id') || '' }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
+    return fetchBuffer(apiUrl(pv, { action: 'get_series_info', series_id: q.get('id') || '' }), (e, b) => e ? sendJSON(res, 502, { error: 'upstream' }) : passThroughJSON(res, b));
   }
   if (p === '/api/search') {
     const term = norm(q.get('q'));
     const type = q.get('type');
     const limit = Math.min(parseInt(q.get('limit') || '60', 10) || 60, 120);
     if (term.length < 2) return sendJSON(res, 200, { ready: true, results: [] });
-    if (SEARCH.at && Date.now() - SEARCH.at < INDEX_TTL) return runSearch(res, term, type, limit);
-    return buildIndex().then(() => runSearch(res, term, type, limit)).catch(() => sendJSON(res, 200, { ready: false, results: [] }));
+    const S = sIndex(pv.id);
+    if (S.at && Date.now() - S.at < INDEX_TTL) return runSearch(res, pv, term, type, limit);
+    return buildIndex(pv).then(() => runSearch(res, pv, term, type, limit)).catch(() => sendJSON(res, 200, { ready: false, results: [] }));
   }
   if (p === '/api/download') {
-    const rec = startDownload({ type: q.get('type') || 'movie', id: q.get('id'), ext: q.get('ext'), name: q.get('name'), icon: q.get('icon') });
+    const rec = startDownload({ type: q.get('type') || 'movie', id: q.get('id'), ext: q.get('ext'), name: q.get('name'), icon: q.get('icon'), pv });
     return sendJSON(res, 200, { ok: true, item: cleanRec(rec) });
   }
   if (p === '/api/downloads') {
@@ -506,29 +534,29 @@ const server = http.createServer((req, res) => {
     removeDownload(q.get('key')); return sendJSON(res, 200, { ok: true });
   }
   if (p === '/api/epg') {
-    return ensureEPG().then(() => sendJSON(res, 200, epgFor(q.get('ch'), Date.now())));
+    return ensureEPG(pv).then(() => sendJSON(res, 200, epgFor(pv.id, q.get('ch'), Date.now())));
   }
   if (p === '/api/epg/now') {
-    return ensureEPG().then(() => {
-      const now = Date.now(); const out = {};
-      for (const ch in EPG.byCh) { const f = epgFor(ch, now); if (f.now) out[ch] = { t: f.now.t, s: f.now.s, e: f.now.e, n: (f.upcoming[0] && f.upcoming[0].t) || '' }; }
-      sendJSON(res, 200, { at: EPG.at, ch: out });
+    return ensureEPG(pv).then(() => {
+      const now = Date.now(); const out = {}; const E = eIndex(pv.id);
+      for (const ch in E.byCh) { const f = epgFor(pv.id, ch, now); if (f.now) out[ch] = { t: f.now.t, s: f.now.s, e: f.now.e, n: (f.upcoming[0] && f.upcoming[0].t) || '' }; }
+      sendJSON(res, 200, { at: E.at, ch: out });
     });
   }
-  if (p === '/api/cache/warm') { warmCache(); return sendJSON(res, 200, { ok: true }); }
+  if (p === '/api/cache/warm') { warmCache(pv); return sendJSON(res, 200, { ok: true }); }
   if (p === '/api/cache/status') { return sendJSON(res, 200, warmState); }
   if (p === '/api/top') {
     const type = q.get('type') === 'series' ? 'series' : 'vod';
     const limit = Math.min(parseInt(q.get('limit') || '24', 10) || 24, 60);
-    const run = () => getPremiumCats(type, (prem) => {
-      const arr = (SEARCH[type] || [])
+    const run = () => getPremiumCats(pv, type, (prem) => {
+      const arr = (sIndex(pv.id)[type] || [])
         .filter(it => it.icon && it.rating && parseFloat(it.rating) >= 7 && parseFloat(it.rating) <= 9.6 && (prem.size === 0 || prem.has(String(it.cat))))
         .sort((a, b) => parseFloat(b.rating) - parseFloat(a.rating))
         .slice(0, limit).map(({ _n, ...r }) => r);
       sendJSON(res, 200, { results: arr });
     });
-    if (SEARCH.at) return run();
-    return buildIndex().then(run);
+    if (sIndex(pv.id).at) return run();
+    return buildIndex(pv).then(run);
   }
   if (p === '/api/local') {
     return sendJSON(res, 200, { items: listLocal().map(x => ({ name: x.name, file: x.file, size: x.size, ext: x.ext })) });
@@ -598,7 +626,7 @@ const server = http.createServer((req, res) => {
 
   let m;
   // HLS ao vivo (toca nativo no Safari / hls.js = aceleração de hardware, leve)
-  if ((m = p.match(/^\/hls\/live\/(\d+)\.m3u8$/))) return serveHls(res, `${BASE}/live/${username}/${password}/${m[1]}.m3u8`);
+  if ((m = p.match(/^\/hls\/live\/(\d+)\.m3u8$/))) return serveHls(res, `${pv.base}/live/${pv.username}/${pv.password}/${m[1]}.m3u8`);
   if (p === '/hls/p') { const s = q.get('u'); if (!s) { res.writeHead(400); return res.end(); } return serveHls(res, s); }
   if (p === '/hls/seg') { const s = q.get('u'); if (!s) { res.writeHead(400); return res.end(); } return proxyStream(req, res, s); }
 
@@ -608,10 +636,10 @@ const server = http.createServer((req, res) => {
     return serveLocal(req, res, path.join(DLDIR, safe));
   }
 
-  if ((m = p.match(/^\/stream\/live\/(\d+)$/))) return proxyStream(req, res, `${BASE}/live/${username}/${password}/${m[1]}.ts`);
+  if ((m = p.match(/^\/stream\/live\/(\d+)$/))) return proxyStream(req, res, `${pv.base}/live/${pv.username}/${pv.password}/${m[1]}.ts`);
   // transcode ao vivo HEVC->H264 (pra canais [H265] tocarem em qualquer tela)
   if ((m = p.match(/^\/transcode\/live\/(\d+)$/))) {
-    const src = `${BASE}/live/${username}/${password}/${m[1]}.ts`;
+    const src = `${pv.base}/live/${pv.username}/${pv.password}/${m[1]}.ts`;
     res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Cache-Control': 'no-store' });
     const ff = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error',
@@ -632,11 +660,11 @@ const server = http.createServer((req, res) => {
   }
   if ((m = p.match(/^\/stream\/movie\/(\d+)\.([a-z0-9]+)$/i))) {
     const dl = q.get('dl') ? { filename: `${sanitize(q.get('name') || 'filme')}.${m[2]}` } : undefined;
-    return proxyStream(req, res, `${BASE}/movie/${username}/${password}/${m[1]}.${m[2]}`, dl);
+    return proxyStream(req, res, `${pv.base}/movie/${pv.username}/${pv.password}/${m[1]}.${m[2]}`, dl);
   }
   if ((m = p.match(/^\/stream\/series\/(\d+)\.([a-z0-9]+)$/i))) {
     const dl = q.get('dl') ? { filename: `${sanitize(q.get('name') || 'episodio')}.${m[2]}` } : undefined;
-    return proxyStream(req, res, `${BASE}/series/${username}/${password}/${m[1]}.${m[2]}`, dl);
+    return proxyStream(req, res, `${pv.base}/series/${pv.username}/${pv.password}/${m[1]}.${m[2]}`, dl);
   }
 
   serveStatic(res, p);
@@ -644,9 +672,10 @@ const server = http.createServer((req, res) => {
 
 loadDLIndex();
 server.listen(PORT, () => {
-  console.log(`Fluxo rodando em http://0.0.0.0:${PORT}  (provedor: ${host})`);
-  buildIndex(); // aquece o índice de busca em segundo plano
-  buildEPG();   // aquece o guia (XMLTV) em segundo plano
+  const def = getPv(DEFAULT_PV);
+  console.log(`Fluxo rodando em http://0.0.0.0:${PORT}  (provedores: ${Object.keys(PROVIDERS).join(', ')} | padrão: ${def ? def.host : '—'})`);
+  buildIndex(def); // aquece o índice de busca do provedor padrão em segundo plano
+  buildEPG(def);   // aquece o guia (XMLTV) do provedor padrão em segundo plano
   if (JK) {
     setTimeout(() => fetchIndexerList(refreshTrackers), 3000); // aprende os ids e já checa a saúde (antes do 1º clique)
     setInterval(refreshTrackers, 4 * 60 * 1000);               // saúde periódica (consulta paralela, resiliente)
