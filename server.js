@@ -399,7 +399,11 @@ function serveStatic(res, p) {
   const file = path.join(__dirname, 'public', safe);
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); return res.end('not found'); }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream' });
+    const ext = path.extname(file).toLowerCase();
+    const h = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    // html/js/css sempre revalidam (deploy aplica na hora); logo/ícones podem cachear
+    h['Cache-Control'] = /\.(html|js|css)$/.test(ext) ? 'no-cache' : 'public, max-age=86400';
+    res.writeHead(200, h);
     res.end(data);
   });
 }
@@ -420,16 +424,16 @@ function getPremiumCats(pv, type, cb) {
   });
 }
 
-// categorias adultas (pro filtro do perfil Kid)
-const ADULT_RE = /(adult[oa]s?|\bxxx\b|porn|er[óo]tic|\bsex\b|sexy|\bhot\b|\+\s?18|18\s?\+|playboy|brazzers)/i;
-const adultCats = {};   // "pvId:type" -> { set, at }
-function getAdultCats(pv, type, cb) {
-  const k = pv.id + ':' + type; const c = adultCats[k];
+// perfil Kid = LISTA BRANCA: mostra só categorias infantis (mais seguro que esconder as adultas uma a uma)
+const KID_RE = /infantil|infantis|\bkids?\b|desenho|anima[cç][aã]o|crian[cç]|cartoon|gloob|\bnick\b|discovery\s*kid|\bbaby\b|\bjunior\b|\bturma\b|pixar|dreamworks/i;
+const kidCatsCache = {};   // "pvId:type" -> { set, at }
+function getKidCats(pv, type, cb) {
+  const k = pv.id + ':' + type; const c = kidCatsCache[k];
   if (c && Date.now() - c.at < 3600000) return cb(c.set);
   fetchBuffer(apiUrl(pv, { action: CAT_ACTIONS[type] }), (e, b) => {
     const set = new Set();
-    if (!e) { try { const a = JSON.parse(b.toString()); if (Array.isArray(a)) a.forEach(cc => { if (ADULT_RE.test(cc.category_name)) set.add(String(cc.category_id)); }); } catch {} }
-    adultCats[k] = { set, at: Date.now() }; cb(set);
+    if (!e) { try { const a = JSON.parse(b.toString()); if (Array.isArray(a)) a.forEach(cc => { if (KID_RE.test(cc.category_name)) set.add(String(cc.category_id)); }); } catch {} }
+    kidCatsCache[k] = { set, at: Date.now() }; cb(set);
   });
 }
 
@@ -463,12 +467,12 @@ function buildIndex(pv) {
   return BUILDING[pv.id];
 }
 
-function runSearch(res, pv, q, type, limit, badCats) {
+function runSearch(res, pv, q, type, limit, onlyCats) {
   const S = sIndex(pv.id);
   const types = type && S[type] ? [type] : ['vod', 'series', 'live'];
   const hits = [];
   for (const t of types) for (const it of S[t]) {
-    if (badCats && (badCats.has(String(it.cat)) || ADULT_RE.test(it.name || ''))) continue;   // perfil Kid
+    if (onlyCats && !onlyCats.has(String(it.cat))) continue;   // perfil Kid: só categorias infantis
     if (it._n.includes(q)) { hits.push(it); if (hits.length >= limit * 3) break; }
   }
   hits.sort((a, b) => (b._n.startsWith(q) ? 1 : 0) - (a._n.startsWith(q) ? 1 : 0));
@@ -619,7 +623,7 @@ const server = http.createServer((req, res) => {
       if (e) return sendJSON(res, 502, { error: 'upstream' });
       if (!kid) return passThroughJSON(res, b);
       let a = []; try { a = JSON.parse(b.toString()); } catch {}
-      if (Array.isArray(a)) a = a.filter(c => !ADULT_RE.test(c.category_name));   // perfil Kid: sem categorias adultas
+      if (Array.isArray(a)) a = a.filter(c => KID_RE.test(c.category_name));   // perfil Kid: SÓ categorias infantis
       sendJSON(res, 200, a);
     });
   }
@@ -632,9 +636,9 @@ const server = http.createServer((req, res) => {
     return fetchBuffer(apiUrl(pv, params), (e, b) => {
       if (e) return sendJSON(res, 502, { error: 'upstream' });
       if (!kid) return passThroughJSON(res, b);
-      getAdultCats(pv, type, (bad) => {                                          // perfil Kid: tira itens de categoria adulta
+      getKidCats(pv, type, (good) => {                                           // perfil Kid: SÓ itens de categoria infantil
         let a = []; try { a = JSON.parse(b.toString()); } catch {}
-        if (Array.isArray(a)) a = a.filter(it => !bad.has(String(it.category_id)) && !ADULT_RE.test(it.name || ''));
+        if (Array.isArray(a)) a = a.filter(it => good.has(String(it.category_id)));
         sendJSON(res, 200, a);
       });
     });
@@ -654,8 +658,8 @@ const server = http.createServer((req, res) => {
     const go = () => {
       if (!kid) return runSearch(res, pv, term, type, limit, null);
       const types = type ? [type] : ['vod', 'series', 'live'];
-      let left = types.length; const bad = new Set();
-      types.forEach(t => getAdultCats(pv, t, s => { s.forEach(x => bad.add(x)); if (--left === 0) runSearch(res, pv, term, type, limit, bad); }));
+      let left = types.length; const good = new Set();
+      types.forEach(t => getKidCats(pv, t, s => { s.forEach(x => good.add(x)); if (--left === 0) runSearch(res, pv, term, type, limit, good); }));
     };
     const S = sIndex(pv.id);
     if (S.at && Date.now() - S.at < INDEX_TTL) return go();
@@ -687,10 +691,10 @@ const server = http.createServer((req, res) => {
     const type = q.get('type') === 'series' ? 'series' : 'vod';
     const limit = Math.min(parseInt(q.get('limit') || '24', 10) || 24, 60);
     const kid = isKid(q, req);
-    const run = () => getPremiumCats(pv, type, (prem) => getAdultCats(pv, type, (bad) => {
+    const run = () => getPremiumCats(pv, type, (prem) => getKidCats(pv, type, (good) => {
       const arr = (sIndex(pv.id)[type] || [])
         .filter(it => it.icon && it.rating && parseFloat(it.rating) >= 7 && parseFloat(it.rating) <= 9.6 && (prem.size === 0 || prem.has(String(it.cat))))
-        .filter(it => !kid || (!bad.has(String(it.cat)) && !ADULT_RE.test(it.name || '')))
+        .filter(it => !kid || good.has(String(it.cat)))   // perfil Kid: só categorias infantis
         .sort((a, b) => parseFloat(b.rating) - parseFloat(a.rating))
         .slice(0, limit).map(({ _n, ...r }) => r);
       sendJSON(res, 200, { results: arr });

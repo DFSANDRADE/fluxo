@@ -31,16 +31,16 @@ function pushState() {
   }, 700);
 }
 async function loadState() {
+  // servidor é a fonte da verdade do PERFIL ativo: substitui tudo (perfil novo começa zerado,
+  // sem vazar o localStorage de outro perfil). localStorage vira só cache do perfil atual.
   let s = {};
   try { s = await api('/api/state'); } catch {}
-  if (!s || typeof s !== 'object') return;
-  const serverEmpty = !s.fav && !s.hits && !s.cont && !s.watched;
-  if (Array.isArray(s.fav)) { FAV = s.fav; store.set('fav', FAV); }
-  if (s.hits && typeof s.hits === 'object') { HITS = s.hits; store.set('hits', HITS); }
-  if (s.cont && typeof s.cont === 'object') { CONT = s.cont; store.set('cont', CONT); }
-  if (Array.isArray(s.watched)) { WATCHED = s.watched; store.set('watched', WATCHED); }
-  // servidor zerado + aparelho já tem dados locais → semeia o servidor (ex.: favoritos antigos do PC)
-  if (serverEmpty && (FAV.length || WATCHED.length || Object.keys(HITS).length || Object.keys(CONT).length)) pushState();
+  s = (s && typeof s === 'object') ? s : {};
+  FAV = Array.isArray(s.fav) ? s.fav : [];
+  HITS = (s.hits && typeof s.hits === 'object') ? s.hits : {};
+  CONT = (s.cont && typeof s.cont === 'object') ? s.cont : {};
+  WATCHED = Array.isArray(s.watched) ? s.watched : [];
+  store.set('fav', FAV); store.set('hits', HITS); store.set('cont', CONT); store.set('watched', WATCHED);
 }
 
 function recordWatch(type, id, name, icon) {
@@ -100,12 +100,19 @@ function toast(msg) {
 }
 
 /* ---------- tabs ---------- */
-$('#tabs').addEventListener('click', e => {
-  const b = e.target.closest('.tab'); if (!b) return;
+function activateTab(b) {
   [...document.querySelectorAll('.tab')].forEach(t => t.classList.toggle('active', t === b));
   TYPE = b.dataset.type; $('#q').value = ''; SEARCHING = false;
   syncSourcesToTab();
   loadTab();
+}
+$('#tabs').addEventListener('click', e => {
+  const b = e.target.closest('.tab'); if (!b) return;
+  // perfil Kids: "Baixados" pode ter conteúdo adulto baixado → pede PIN (quando há PIN definido)
+  if (PROFILE && PROFILE.kid && b.dataset.type === 'local' && typeof CFG !== 'undefined' && CFG.hasPin && !ADMIN_PIN) {
+    return askPin('abrir os <b>Baixados</b>', () => activateTab(b));
+  }
+  activateTab(b);
 });
 
 /* ---------- carregar aba ---------- */
@@ -900,8 +907,34 @@ function setActiveProfile(prof, reload) {
   let pv = store.get('pv', null);
   if (!allowed.includes(pv)) pv = allowed[0];
   PV = pv; store.set('profile', prof.id); store.set('pv', pv);
-  applyCookies(); renderProfileChip(); renderPvSel();
+  applyCookies(); renderProfileChip(); renderPvSel(); applyProfileUI();
   if (reload) location.reload();
+}
+// esconde aba Torrents e engrenagem no perfil Kids
+function applyProfileUI() {
+  const kid = !!(PROFILE && PROFILE.kid);
+  document.body.classList.toggle('kid', kid);
+  const t = document.querySelector('.tab[data-type="torrents"]'); if (t) t.style.display = kid ? 'none' : '';
+  const sb = $('#setbtn'); if (sb) sb.style.display = kid ? 'none' : '';
+}
+// trocar de perfil: perfil adulto exige PIN (criança não sai do Kids sem o PIN)
+function pickProfile(p) {
+  if (!p) return;
+  if (!p.kid && CFG.hasPin && !ADMIN_PIN) return askPin(`entrar em <b>${esc(p.name)}</b>`, () => setActiveProfile(p, true), renderProfilePicker);
+  setActiveProfile(p, true);
+}
+// prompt de PIN reutilizável (troca de perfil adulto, abrir Baixados, etc.)
+function askPin(label, onOk, onCancel) {
+  const grid = $('#prof-grid');
+  grid.innerHTML = `<div class="prof-pinbox"><div class="prof-pin-h">🔒 PIN para ${label}</div>
+    <input id="pp-in" type="password" inputmode="numeric" autocomplete="off" class="set-inp" placeholder="PIN">
+    <div class="set-row" style="justify-content:center;margin-top:12px"><button class="btn ghost" id="pp-cancel">Voltar</button><button class="btn primary" id="pp-ok">Entrar</button></div>
+    <div id="pp-err" class="set-err" style="text-align:center"></div></div>`;
+  $('#profiles').classList.remove('hidden');
+  const close = () => $('#profiles').classList.add('hidden');
+  const go = async () => { let r = {}; try { r = await apiPost('/api/admin/auth', { pin: $('#pp-in').value }); } catch {} if (r.ok) { ADMIN_PIN = $('#pp-in').value; close(); onOk(); } else $('#pp-err').textContent = 'PIN incorreto.'; };
+  $('#pp-ok').onclick = go; $('#pp-in').onkeydown = e => { if (e.key === 'Enter') go(); };
+  $('#pp-cancel').onclick = () => { close(); if (onCancel) onCancel(); }; $('#pp-in').focus();
 }
 function switchProvider(id) {
   if (!PROFILE || !(PROFILE.providers || []).includes(id)) return;
@@ -924,7 +957,7 @@ function profAvatar(p) { return `<div class="prof-av" style="--c:${p.color || '#
 function renderProfilePicker() {
   const grid = $('#prof-grid');
   grid.innerHTML = (CFG.profiles || []).map(p => `<button class="prof-card" data-id="${p.id}">${profAvatar(p)}<span>${esc(p.name)}</span></button>`).join('');
-  grid.querySelectorAll('.prof-card').forEach(b => b.onclick = () => setActiveProfile((CFG.profiles || []).find(p => p.id === b.dataset.id), true));
+  grid.querySelectorAll('.prof-card').forEach(b => b.onclick = () => pickProfile((CFG.profiles || []).find(p => p.id === b.dataset.id)));
   $('#profiles').classList.remove('hidden');
 }
 
