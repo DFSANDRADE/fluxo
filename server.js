@@ -266,16 +266,22 @@ function loadDLIndex() {
     }
   } catch {}
 }
-function startDownload({ type, id, ext, name, icon, pv }) {
+const AUTO_TTL = 24 * 3600 * 1000;   // cache temporário (auto, de assistir) dura 24h e é apagado sozinho
+function startDownload({ type, id, ext, name, icon, pv, auto }) {
   pv = pv || getPv(DEFAULT_PV);
   const key = dlKey(type, id);
-  if (DOWNLOADS[key] && DOWNLOADS[key].status !== 'error') return DOWNLOADS[key];
+  const existing = DOWNLOADS[key];
+  if (existing && existing.status !== 'error') {
+    if (!auto && existing.auto) { existing.auto = false; delete existing.expireAt; saveDLIndex(); }  // download manual promove a permanente
+    return existing;
+  }
   ext = (ext || 'mp4').replace(/[^a-z0-9]/gi, '') || 'mp4';
   const subdir = type === 'series' ? 'series' : 'filmes';
   const dir = path.join('/dados/midia', subdir);
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   const abs = path.join(dir, `${sanitize(name)}.${ext}`);
-  const rec = DOWNLOADS[key] = { key, type, id, ext, name, icon, file: abs, status: 'downloading', received: 0, total: 0, at: Date.now() };
+  const rec = DOWNLOADS[key] = { key, type, id, ext, name, icon, file: abs, status: 'downloading', received: 0, total: 0, at: Date.now(), auto: !!auto };
+  if (auto) rec.expireAt = Date.now() + AUTO_TTL;
   const url = `${pv.base}/${type === 'series' ? 'series' : 'movie'}/${pv.username}/${pv.password}/${id}.${ext}`;
   openUpstream(url, {}, (err, up) => {
     if (err) { rec.status = 'error'; saveDLIndex(); return; }
@@ -299,7 +305,21 @@ function removeDownload(key) {
   try { fs.unlinkSync(r.file + '.part'); } catch {}
   delete DOWNLOADS[key]; saveDLIndex();
 }
-const cleanRec = (r) => ({ key: r.key, type: r.type, id: r.id, name: r.name, icon: r.icon, ext: r.ext, file: r.file, status: r.status, received: r.received, total: r.total });
+const cleanRec = (r) => ({ key: r.key, type: r.type, id: r.id, name: r.name, icon: r.icon, ext: r.ext, file: r.file, status: r.status, received: r.received, total: r.total, auto: !!r.auto, expireAt: r.expireAt || 0 });
+// apaga os caches temporários (auto) vencidos — não toca nos downloads que o usuário pediu
+function cleanupAutoDownloads() {
+  const now = Date.now(); let removed = 0;
+  for (const k in DOWNLOADS) {
+    const r = DOWNLOADS[k];
+    if (r.auto && r.expireAt && now > r.expireAt) {
+      try { if (r._abort) r._abort(); } catch {}
+      try { fs.unlinkSync(r.file); } catch {}
+      try { fs.unlinkSync(r.file + '.part'); } catch {}
+      delete DOWNLOADS[k]; removed++;
+    }
+  }
+  if (removed) { saveDLIndex(); console.log(`Cache temporário: ${removed} item(ns) vencido(s) apagado(s)`); }
+}
 
 // ---- Mídia Local: vídeos que o usuário põe na pasta + filmes/séries baixados ----
 const MEDIA_ROOTS = CONFIG.mediaRoots || ['/dados/midia', DLDIR];
@@ -666,7 +686,7 @@ const server = http.createServer((req, res) => {
     return buildIndex(pv).then(go).catch(() => sendJSON(res, 200, { ready: false, results: [] }));
   }
   if (p === '/api/download') {
-    const rec = startDownload({ type: q.get('type') || 'movie', id: q.get('id'), ext: q.get('ext'), name: q.get('name'), icon: q.get('icon'), pv });
+    const rec = startDownload({ type: q.get('type') || 'movie', id: q.get('id'), ext: q.get('ext'), name: q.get('name'), icon: q.get('icon'), pv, auto: q.get('auto') === '1' });
     return sendJSON(res, 200, { ok: true, item: cleanRec(rec) });
   }
   if (p === '/api/downloads') {
@@ -818,6 +838,8 @@ const server = http.createServer((req, res) => {
 });
 
 loadDLIndex();
+cleanupAutoDownloads();                          // limpa caches temporários vencidos no boot
+setInterval(cleanupAutoDownloads, 3600 * 1000);  // e de hora em hora
 server.listen(PORT, () => {
   const def = getPv(DEFAULT_PV);
   console.log(`Fluxo rodando em http://0.0.0.0:${PORT}  (provedores: ${Object.keys(PROVIDERS).join(', ')} | padrão: ${def ? def.host : '—'})`);

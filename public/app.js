@@ -55,8 +55,8 @@ const INDEX = { live: {}, vod: {}, series: {} };   // id -> item (vai preenchend
 /* ---------- downloads ---------- */
 const dlOf = (type, id) => DL[type + ':' + id];
 async function refreshDL() { try { const d = await api('/api/downloads'); DL = {}; (d.items || []).forEach(i => DL[i.key] = i); } catch {} }
-function srvDownload(type, id, ext, name, icon) {
-  return api(`/api/download?type=${type}&id=${id}&ext=${encodeURIComponent(ext || 'mp4')}&name=${encodeURIComponent(name || '')}&icon=${encodeURIComponent(icon || '')}`)
+function srvDownload(type, id, ext, name, icon, auto) {
+  return api(`/api/download?type=${type}&id=${id}&ext=${encodeURIComponent(ext || 'mp4')}&name=${encodeURIComponent(name || '')}&icon=${encodeURIComponent(icon || '')}&auto=${auto ? 1 : 0}`)
     .then(r => { if (r.item) DL[r.item.key] = r.item; return r.item; });
 }
 function deviceDownload(type, id, ext, name) {
@@ -183,22 +183,36 @@ async function buildHeroFeatured(cats, seq) {
 
 /* ---------- Mídia Local (vídeos na pasta + baixados; funciona offline) ---------- */
 const LOCAL_NOTE = `<div class="pagenote">Aqui aparece tudo que está no servidor: o que você <b>baixou do IPTV</b>, o que veio dos <b>torrents</b>, e o que você <b>jogar na pasta</b> (drive Samba <b>dados/midia</b>). Tudo toca <b>sem internet</b>, direto da sua rede.</div>`;
+function dlCard(d) {   // card de download em progresso (ou com erro)
+  const card = document.createElement('div'); card.className = 'card poster';
+  const err = d.status === 'error', p = err ? 0 : pct(d);
+  card.innerHTML = `<div class="thumb noimg"><div class="ph">${esc(initials(d.name))}</div>
+    <div class="dl-ov"><div class="dl-bar"><span style="width:${p}%"></span></div><div class="dl-ovs">${err ? 'erro' : p + '%'}</div></div></div>
+    <div class="meta"><div class="title">${esc(d.name)}</div><div class="now">${err ? 'falhou — toque pra tentar' : 'baixando…'}${d.total ? ' · ' + (d.total / 1048576).toFixed(0) + ' MB' : ''}</div></div>`;
+  if (err) card.onclick = () => srvDownload(d.type === 'series' ? 'series' : 'movie', d.id, d.ext, d.name, d.icon).then(() => startDLPolling());
+  return card;
+}
+function localCard(it, temp) {
+  const card = document.createElement('div'); card.className = 'card poster';
+  const gb = it.size >= 1073741824 ? (it.size / 1073741824).toFixed(2) + ' GB' : (it.size / 1048576).toFixed(0) + ' MB';
+  card.innerHTML = `<div class="thumb noimg"><div class="ph">${esc(initials(it.name))}</div>${temp ? '<span class="tempbadge">TEMP 24h</span>' : ''}</div>
+    <div class="meta"><div class="title">${esc(it.name)}</div><div class="now">${gb} · ${esc(it.ext)}</div></div>`;
+  card.onclick = () => playLocal(it);
+  return card;
+}
 async function renderLocal(rows) {
   let data = { items: [] };
   try { data = await api('/api/local'); } catch {}
-  if (!data.items || !data.items.length) {
+  rows.innerHTML = '';
+  const active = Object.values(DL).filter(d => d.status === 'downloading' || d.status === 'error');
+  if (active.length) rows.appendChild(staticRow('⬇ Baixando agora', active.map(dlCard)));   // progresso aparece aqui também
+  if (data.items && data.items.length) {
+    const tempFiles = {}; Object.values(DL).forEach(d => { if (d.auto && d.file) tempFiles[d.file] = 1; });
+    rows.appendChild(staticRow(`Baixados · ${data.items.length}`, data.items.map(it => localCard(it, tempFiles[it.file]))));
+  } else if (!active.length) {
     rows.innerHTML = `<div class="empty">Nada baixado ainda.<br><small>Baixe filmes/séries (IPTV ou torrents) ou jogue vídeos na pasta — tudo aparece aqui e funciona offline.</small></div>` + LOCAL_NOTE;
     return;
   }
-  const cards = data.items.map(it => {
-    const card = document.createElement('div'); card.className = 'card poster';
-    const gb = it.size >= 1073741824 ? (it.size / 1073741824).toFixed(2) + ' GB' : (it.size / 1048576).toFixed(0) + ' MB';
-    card.innerHTML = `<div class="thumb noimg"><div class="ph">${esc(initials(it.name))}</div></div>
-      <div class="meta"><div class="title">${esc(it.name)}</div><div class="now">${gb} · ${esc(it.ext)}</div></div>`;
-    card.onclick = () => playLocal(it);
-    return card;
-  });
-  rows.appendChild(staticRow(`Baixados · ${data.items.length}`, cards));
   rows.insertAdjacentHTML('beforeend', LOCAL_NOTE);
 }
 function playLocal(it) {
@@ -558,14 +572,13 @@ video.addEventListener('playing', () => { retryN = 0; });
 video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); });
 video.addEventListener('error', reconnectStream);
 
-// garante o filme offline: após 30s assistindo, começa a baixar pro servidor em 2º plano
+// cache TEMPORÁRIO (não cai no meio): após 30s assistindo, baixa pro servidor marcado como auto.
+// o servidor apaga esses sozinho depois de 24h — só os que o usuário clicar pra baixar ficam permanentes.
 function scheduleAutoCache(type, id, ext, name, icon) {
   clearTimeout(autoCacheT);
   const d = dlOf(type, id);
   if (d && (d.status === 'done' || d.status === 'downloading')) return;
-  autoCacheT = setTimeout(() => {
-    srvDownload(type, id, ext, name, icon).then(() => { toast('Guardando no servidor (garantia offline)'); startDLPolling(); });
-  }, 30000);
+  autoCacheT = setTimeout(() => { srvDownload(type, id, ext, name, icon, true).then(() => startDLPolling()); }, 30000);
 }
 
 function destroyPlayers() {
@@ -705,7 +718,7 @@ function wireDownloadButtons(type, id, ext, name, icon, show) {
   srv.style.display = ''; dev.style.display = '';
   const refresh = () => { const d = dlOf(type, id); srv.innerHTML = d ? (d.status === 'done' ? '✓ Baixado' : d.status === 'error' ? '↻ Tentar de novo' : `⬇ Baixando ${pct(d)}%`) : '⬇ Baixar offline'; };
   _srvRefresh = refresh; refresh();
-  srv.onclick = () => srvDownload(type, id, ext, name, icon).then(() => { toast('Começou a baixar — veja em Downloads'); refresh(); startDLPolling(); });
+  srv.onclick = () => srvDownload(type, id, ext, name, icon).then(() => { toast('Começou a baixar — veja na aba Baixados'); refresh(); startDLPolling(); });
   dev.onclick = () => deviceDownload(type, id, ext, name);
 }
 
@@ -716,6 +729,7 @@ function startDLPolling() {
   dlPoll = setInterval(async () => {
     await refreshDL();
     if (!$('#downloads').classList.contains('hidden')) renderDownloads();
+    if (TYPE === 'local' && !SEARCHING) renderLocal($('#rows'));   // aba Baixados atualiza o progresso sozinha
     if (_srvRefresh) _srvRefresh();
     if (!Object.values(DL).some(d => d.status === 'downloading')) { clearInterval(dlPoll); dlPoll = null; }
   }, 2500);
