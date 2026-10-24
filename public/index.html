@@ -109,6 +109,17 @@
     </div>
   </div>
 
+  <!-- botão "travou ou tá ruim" (sempre visível) -->
+  <button id="fixbtn" title="Travou ou tá ruim? Resolver">🛠</button>
+
+  <!-- painel de diagnóstico / resolução -->
+  <div class="modal hidden" id="diag">
+    <div class="sheet diag-sheet">
+      <button class="close" data-close-diag>✕</button>
+      <div class="d-body" id="diag-body"></div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
   <script src="/app.js?v=2" defer></script>

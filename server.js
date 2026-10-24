@@ -12,6 +12,12 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { URL, URLSearchParams } = require('url');
+const os = require('os');
+
+// buffer dos últimos logs (pro diagnóstico "travou ou tá ruim")
+const LOGBUF = [];
+['log', 'error', 'warn'].forEach(k => { const orig = console[k].bind(console); console[k] = (...a) => { try { LOGBUF.push(new Date().toISOString().slice(11, 19) + ' ' + a.map(String).join(' ')); if (LOGBUF.length > 120) LOGBUF.shift(); } catch {} orig(...a); }; });
+let transcodeCount = 0;   // transcodes ffmpeg ativos agora
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 let CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
@@ -551,6 +557,52 @@ function epgFor(pvId, ch, now) {
   return { now: cur, upcoming: list.slice(nextIdx, nextIdx + 6) };
 }
 
+/* ---------- diagnóstico "travou ou tá ruim" ---------- */
+// baixa uns MB do provedor e mede a velocidade real servidor→provedor (MB/s)
+function measureSpeed(url, maxBytes, timeoutMs) {
+  return new Promise((resolve) => {
+    const t0 = Date.now(); let got = 0, done = false;
+    const finish = (up) => { if (done) return; done = true; try { up && up.destroy(); } catch {} const s = (Date.now() - t0) / 1000; resolve(s > 0.05 ? +((got / 1048576) / s).toFixed(2) : 0); };
+    openUpstream(url, { Range: `bytes=0-${maxBytes - 1}` }, (err, up) => {
+      if (err) return resolve(0);
+      up.on('data', (c) => { got += c.length; if (got >= maxBytes) finish(up); });
+      up.on('end', () => finish(up)); up.on('error', () => finish(up));
+    }, 0, timeoutMs);
+  });
+}
+// regras: do relatório (cliente + servidor) deduz o gargalo e a correção recomendada. ESSAS REGRAS A GENTE EVOLUI.
+function analyzeBottleneck(r) {
+  const s = r.server || {}, c = r.client || {};
+  const hasAlt = (c.providerCount || 0) > 1;   // perfil tem outro provedor p/ failover?
+  const A = {
+    reconnect: { id: 'reconnect', label: '🔄 Reconectar o vídeo', auto: true },
+    compat: { id: 'compat', label: '⚙ Ligar compatibilidade (transcode)', auto: true },
+    switchpv: { id: 'switchpv', label: '📡 Trocar de provedor', auto: false },
+    reload: { id: 'reload', label: '🧹 Limpar cache e recarregar', auto: false },
+    restart: { id: 'restart', label: '♻️ Reiniciar o servidor', auto: false },
+    clean: { id: 'reload', label: '🧹 Recarregar a página', auto: false },
+  };
+  let cause, verdict, actions;
+  if (s.diskFreeGB != null && s.diskFreeGB < 1) {
+    cause = 'disk'; verdict = 'Disco do servidor quase cheio — downloads/cache travam.'; actions = [A.reload];
+  } else if (s.providerApiMs != null && s.providerApiMs > 6000) {
+    cause = 'provider_api'; verdict = 'O provedor está demorando MUITO pra responder (pode estar instável/fora do ar).'; actions = hasAlt ? [A.switchpv, A.reconnect] : [A.reconnect, A.reload];
+  } else if (s.providerSpeedMBs != null && s.providerSpeedMBs > 0 && s.providerSpeedMBs < 1.2) {
+    cause = 'provider_slow'; verdict = `O provedor está lento (${s.providerSpeedMBs} MB/s do servidor). O gargalo é o provedor/CDN.`; actions = hasAlt ? [A.switchpv, A.reconnect] : [A.reconnect];
+  } else if (c.liveTC && s.loadPerCore > 2.5) {
+    cause = 'transcode'; verdict = 'O transcode (canal H265) está pesando o servidor. Tente um canal normal ou aguarde.'; actions = [A.reconnect, A.restart];
+  } else if (s.activeDownloads >= 3) {
+    cause = 'downloads'; verdict = `${s.activeDownloads} downloads ao mesmo tempo estão saturando a banda.`; actions = [A.reconnect];
+  } else if (s.loadPerCore > 3) {
+    cause = 'server_load'; verdict = 'O servidor está sobrecarregado.'; actions = [A.reconnect, A.restart];
+  } else if ((s.providerSpeedMBs == null || s.providerSpeedMBs >= 2) && (c.stalls > 0 || c.bufferedAhead < 2 || c.videoErr)) {
+    cause = 'client'; verdict = 'O servidor puxa bem do provedor, então o gargalo é a SUA rede (wifi/Tailscale) ou o aparelho.'; actions = c.liveTC ? [A.reconnect, A.clean] : [A.reconnect, A.compat, A.clean];
+  } else {
+    cause = 'unclear'; verdict = 'Não achei um gargalo claro. Vou religar a conexão — se persistir, tente recarregar.'; actions = [A.reconnect, A.reload];
+  }
+  return { cause, verdict, actions, server: s };
+}
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
   const p = u.pathname;
@@ -634,6 +686,39 @@ const server = http.createServer((req, res) => {
     if (np) CONFIG.adminPin = np; else delete CONFIG.adminPin;
     saveConfig(); sendJSON(res, 200, { ok: true });
   });
+
+  // ---- diagnóstico "travou ou tá ruim": coleta cliente+servidor, acha o gargalo, grava e recomenda ----
+  if (p === '/api/diag') return readJSON(req, async (client) => {
+    client = client || {};
+    const S = {};
+    S.loadPerCore = +(os.loadavg()[0] / (os.cpus().length || 1)).toFixed(2);
+    S.memFreePct = Math.round(os.freemem() / os.totalmem() * 100);
+    try { const st = fs.statfsSync('/dados'); S.diskFreeGB = +((st.bavail * st.bsize) / 1e9).toFixed(1); } catch {}
+    S.activeDownloads = Object.values(DOWNLOADS).filter(d => d.status === 'downloading').length;
+    S.transcodes = transcodeCount;
+    S.logTail = LOGBUF.slice(-15);
+    const t0 = Date.now();
+    await new Promise(r => fetchBuffer(apiUrl(pv, {}), () => { S.providerApiMs = Date.now() - t0; r(); }, 8000));
+    if (client.ctx && (client.ctx.type === 'movie' || client.ctx.type === 'series')) {
+      const kind = client.ctx.type === 'movie' ? 'movie' : 'series';
+      const url = `${pv.base}/${kind}/${pv.username}/${pv.password}/${client.ctx.id}.${client.ctx.ext || 'mp4'}`;
+      S.providerSpeedMBs = await measureSpeed(url, 6 * 1048576, 10000);
+    }
+    const diag = analyzeBottleneck({ client, server: S });
+    try { fs.appendFileSync('/dados/fluxo-diag.jsonl', JSON.stringify({ at: Date.now(), client, server: S, cause: diag.cause, verdict: diag.verdict }) + '\n'); } catch {}
+    sendJSON(res, 200, diag);
+  });
+  if (p === '/api/diag/restart') {   // reinício pedido pelo usuário (systemd Restart=always sobe de novo)
+    sendJSON(res, 200, { ok: true });
+    console.log('Reinício solicitado pelo diagnóstico');
+    setTimeout(() => process.exit(0), 400);
+    return;
+  }
+  if (p === '/api/diag/history') {   // últimas linhas do diagnóstico (pra análise)
+    let lines = [];
+    try { lines = fs.readFileSync('/dados/fluxo-diag.jsonl', 'utf8').trim().split('\n').slice(-50).map(l => JSON.parse(l)); } catch {}
+    return sendJSON(res, 200, { reports: lines });
+  }
 
   if (p === '/api/categories') {
     const type = q.get('type'); const action = CAT_ACTIONS[type];
@@ -817,12 +902,14 @@ const server = http.createServer((req, res) => {
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
       '-f', 'mpegts', '-muxdelay', '0', 'pipe:1'
     ]);
+    transcodeCount++;
     ff.stdout.pipe(res);
     ff.stderr.resume();
+    let ended = false; const endOne = () => { if (!ended) { ended = true; transcodeCount = Math.max(0, transcodeCount - 1); } };
     const kill = () => { try { ff.kill('SIGKILL'); } catch {} };
     req.on('close', kill);
-    ff.on('error', () => { try { res.end(); } catch {} });
-    ff.on('exit', () => { try { res.end(); } catch {} });
+    ff.on('error', () => { endOne(); try { res.end(); } catch {} });
+    ff.on('exit', () => { endOne(); try { res.end(); } catch {} });
     return;
   }
   if ((m = p.match(/^\/stream\/movie\/(\d+)\.([a-z0-9]+)$/i))) {

@@ -547,7 +547,7 @@ function showBuffer(msg) {
 function hideBuffer() { $('#buffering').classList.add('hidden'); clearTimeout(bufT); }
 
 // reconecta filme/episódio no ponto atual (usado em erro E em travamento prolongado)
-let stallT = null, lastProg = 0;
+let stallT = null, lastProg = 0, stallCount = 0;
 function reconnectStream() {
   if (!saveCtx || (saveCtx.type !== 'movie' && saveCtx.type !== 'series')) return;
   if (retryN++ > 6) { hideBuffer(); toast('Não consegui reconectar — o provedor pode estar fora do ar'); return; }
@@ -560,7 +560,7 @@ function reconnectStream() {
 }
 
 video.addEventListener('waiting', () => {
-  showBuffer();
+  showBuffer(); stallCount++;
   clearTimeout(stallT);
   if (saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series')) {   // travou e não anda? reconecta
     stallT = setTimeout(() => { if (!video.paused && Date.now() - lastProg > 11000) reconnectStream(); }, 12000);
@@ -1055,6 +1055,95 @@ $('#profbtn')?.addEventListener('click', renderProfilePicker);
 $('#setbtn')?.addEventListener('click', openSettings);
 $('#prof-manage')?.addEventListener('click', openSettings);
 $('[data-close-set]')?.addEventListener('click', () => $('#settings').classList.add('hidden'));
+
+/* ===================== "travou ou tá ruim": diagnóstico + resolução ===================== */
+function playerDiag() {
+  const playing = !$('#player').classList.contains('hidden');
+  const src = video.currentSrc || '';
+  let mode = 'parado';
+  if (playing) {
+    if (src.includes('/local') || src.includes('/dl/')) mode = 'arquivo local';
+    else if (src.includes('/transcode')) mode = 'transcode H265→H264';
+    else if (hls) mode = 'HLS (hls.js)';
+    else if (mpg) mode = 'MPEG-TS (mpegts.js)';
+    else if (src.includes('/hls/')) mode = 'HLS nativo';
+    else mode = 'direto (mp4)';
+  }
+  let bufAhead = 0; try { if (video.buffered.length) bufAhead = Math.round(video.buffered.end(video.buffered.length - 1) - (video.currentTime || 0)); } catch {}
+  const net = navigator.connection || {};
+  return {
+    playing, mode, liveTC, pv: PV, profile: PROFILE && PROFILE.id,
+    providerCount: PROFILE ? (PROFILE.providers || []).length : 1,
+    ctx: saveCtx ? { type: saveCtx.type, id: saveCtx.id, name: saveCtx.name, ext: saveCtx.ext } : null,
+    videoErr: (video.error && video.error.code) || 0, readyState: video.readyState, networkState: video.networkState,
+    paused: video.paused, bufferedAhead: bufAhead, stalls: stallCount, reconnects: retryN,
+    lite: document.body.classList.contains('lite'),
+    net: { type: net.effectiveType || '?', downlinkMbps: net.downlink || 0, rttMs: net.rtt || 0 },
+    ua: navigator.userAgent.slice(0, 120), cores: navigator.hardwareConcurrency || 0, screen: `${screen.width}x${screen.height}`
+  };
+}
+let diagBusy = false;
+async function runDiag() {
+  if (diagBusy) return; diagBusy = true;
+  $('#diag').classList.remove('hidden');
+  $('#diag-body').innerHTML = `<h1 class="set-h">🛠 Diagnóstico</h1><p class="set-sub">Analisando o que pode estar travando… (uns segundos)</p><div class="diag-spin"><div class="spin"></div></div>`;
+  let d = null; try { d = await apiPost('/api/diag', playerDiag()); } catch {}
+  diagBusy = false;
+  if (!d) { $('#diag-body').innerHTML = `<h1 class="set-h">🛠 Diagnóstico</h1><p class="set-err">Não consegui falar com o servidor — ele pode ter caído. Tente reiniciar/recarregar.</p><div class="diag-actions"><button class="btn primary" id="dg-rl">🧹 Recarregar</button></div>`; $('#dg-rl').onclick = () => location.href = '/?r=' + Date.now(); return; }
+  renderDiag(d);
+  const autoFix = (d.actions || []).find(a => a.auto);
+  if (autoFix) setTimeout(() => applyFix(autoFix, true), 600);   // aplica a correção leve na hora
+}
+function renderDiag(d) {
+  const s = d.server || {};
+  const m = (k, v) => v == null ? '' : `<div class="diag-m"><span>${k}</span><b>${esc(String(v))}</b></div>`;
+  $('#diag-body').innerHTML = `<h1 class="set-h">🛠 Diagnóstico</h1>
+    <div class="diag-verdict">${esc(d.verdict)}</div>
+    <div class="diag-metrics">
+      ${m('Provedor — velocidade', s.providerSpeedMBs != null ? s.providerSpeedMBs + ' MB/s' : '—')}
+      ${m('Provedor — resposta', s.providerApiMs != null ? s.providerApiMs + ' ms' : '—')}
+      ${m('Carga do servidor', s.loadPerCore != null ? s.loadPerCore + ' /núcleo' : '—')}
+      ${m('Memória livre', s.memFreePct != null ? s.memFreePct + '%' : '—')}
+      ${m('Disco livre', s.diskFreeGB != null ? s.diskFreeGB + ' GB' : '—')}
+      ${m('Downloads agora', s.activeDownloads)}
+      ${m('Transcodes agora', s.transcodes)}
+    </div>
+    <div class="diag-sub2">O que fazer:</div><div class="diag-actions" id="diag-actions"></div>`;
+  const box = $('#diag-actions');
+  (d.actions || []).forEach(a => {
+    const btn = document.createElement('button');
+    btn.className = 'btn ' + (a.auto ? 'ghost' : 'primary');
+    btn.textContent = (a.auto ? '↻ ' : '') + a.label;
+    btn.onclick = () => applyFix(a, false);
+    box.appendChild(btn);
+  });
+}
+async function applyFix(a, isAuto) {
+  const id = a.id || a;
+  if (id === 'reconnect') {
+    if (saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series')) { retryN = 0; reconnectStream(); }
+    else if (currentLive) playLive(currentLive, liveTC);
+    toast('Reconectando…'); if (!isAuto) $('#diag').classList.add('hidden');
+  } else if (id === 'compat') {
+    if (currentLive) { playLive(currentLive, true); toast('Compatibilidade ligada'); $('#diag').classList.add('hidden'); }
+    else toast('Compatibilidade só vale pra ao vivo');
+  } else if (id === 'switchpv') {
+    const others = (PROFILE.providers || []).filter(x => x !== PV);
+    if (others.length) { toast('Trocando de provedor…'); switchProvider(others[0]); }
+    else toast('Esse perfil só tem 1 provedor');
+  } else if (id === 'reload') {
+    if (!confirm('Recarregar a página agora? Vai interromper o que estiver tocando.')) return;
+    location.href = '/?r=' + Date.now();
+  } else if (id === 'restart') {
+    const go = async () => { toast('Reiniciando o servidor… (~10s)'); try { await apiPost('/api/diag/restart', {}); } catch {} setTimeout(() => location.href = '/?r=' + Date.now(), 8000); };
+    // do perfil Kids, reiniciar pede o PIN (criança não derruba o servidor sozinha)
+    if (PROFILE && PROFILE.kid && CFG.hasPin && !ADMIN_PIN) { $('#diag').classList.add('hidden'); return askPin('reiniciar o servidor', go); }
+    if (!confirm('Reiniciar o servidor Fluxo?\n\nIsso derruba QUEM ESTIVER ASSISTINDO por alguns segundos (inclusive outros aparelhos).')) return;
+    go();
+  }
+}
+$('#fixbtn')?.addEventListener('click', runDiag);
+$('[data-close-diag]')?.addEventListener('click', () => $('#diag').classList.add('hidden'));
 
 /* ---------- start ---------- */
 bootProfiles().then(ok => {

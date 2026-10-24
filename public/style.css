@@ -407,3 +407,20 @@ body.kid #setbtn{ display:none !important; }
 .card .thumb .dl-bar span{display:block;height:100%;background:var(--accent);transition:width .4s}
 .card .thumb .dl-ovs{font-size:11px;color:#fff;font-weight:600;margin-top:4px;text-shadow:0 1px 3px #000}
 .tempbadge{position:absolute;top:8px;left:8px;background:rgba(255,159,110,.92);color:#2a1500;font-size:9px;font-weight:800;letter-spacing:.5px;padding:3px 7px;border-radius:7px}
+
+/* botão flutuante "travou ou tá ruim" + painel de diagnóstico */
+#fixbtn{position:fixed;right:18px;bottom:18px;z-index:70;width:46px;height:46px;border-radius:50%;
+  border:0;cursor:pointer;font-size:20px;background:linear-gradient(135deg,#ff9f6e,#e06ec1);color:#fff;
+  box-shadow:0 6px 20px rgba(0,0,0,.4);transition:transform .15s,box-shadow .15s;opacity:.85}
+#fixbtn:hover{transform:scale(1.08);opacity:1;box-shadow:0 8px 26px rgba(224,110,193,.5)}
+.diag-sheet{width:min(560px,100%);max-height:88vh;overflow:auto}
+.diag-sheet .d-body{padding:28px}
+.diag-verdict{font-size:15px;line-height:1.5;background:var(--panel);border:1px solid var(--stroke);border-left:3px solid var(--a1);border-radius:12px;padding:14px 16px;margin:12px 0 18px}
+.diag-metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:18px}
+.diag-m{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:var(--muted);background:var(--panel);border:1px solid var(--stroke);border-radius:10px;padding:9px 12px}
+.diag-m b{color:var(--text);font-weight:650}
+.diag-sub2{font-size:13px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--a1);margin-bottom:10px}
+.diag-actions{display:flex;flex-direction:column;gap:8px}
+.diag-actions .btn{width:100%;justify-content:center}
+.diag-spin{display:grid;place-items:center;padding:30px}
+@media (max-width:640px){ .diag-metrics{grid-template-columns:1fr} }
