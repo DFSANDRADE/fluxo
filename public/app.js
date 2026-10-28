@@ -623,7 +623,7 @@ function destroyPlayers() {
   if (mpg) { try { mpg.destroy(); } catch {} mpg = null; }
   if (hls) { try { hls.destroy(); } catch {} hls = null; }
 }
-function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); const cb = $('#compat'); if (cb) cb.style.display = 'none'; $('#player').classList.remove('hidden'); showBuffer('Conectando ao provedor…'); startBufMon(); }
+function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); const cb = $('#compat'); if (cb) cb.style.display = 'none'; const rg = $('#buf-ring'); if (rg) rg.style.display = ''; $('#player').classList.remove('hidden'); showBuffer('Conectando ao provedor…'); startBufMon(); }
 function closePlayer() {
   $('#player').classList.add('hidden');
   try { video.pause(); } catch {}
@@ -652,22 +652,33 @@ function saveProgress() {
 }
 video.addEventListener('timeupdate', saveProgress);
 
-// erro de vídeo: se for codec não suportado (4K/HEVC), CONVERTE no servidor automaticamente; se for rede, reconecta
-function onVideoError() {
+// aviso FIXO na tela (não some sozinho) — pra quando o conteúdo não existe / não toca
+function showError(msg) {
+  clearInterval(bufMon); bufMon = null; clearTimeout(bufT);
+  const b = $('#buffering'); b.classList.remove('hidden');
+  const ring = $('#buf-ring'); if (ring) ring.style.display = 'none';
+  const m = $('#buffering .buf-msg'); if (m) m.textContent = msg;
+}
+// erro de vídeo: verifica se o conteúdo EXISTE; se não, avisa claro; se existe mas não decodifica, converte; rede → reconecta
+async function onVideoError() {
   const code = video.error && video.error.code;
   const isVod = saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series');
-  if ((code === 4 || code === 3) && isVod && !saveCtx._tc) {
-    saveCtx._tc = true;             // tenta converter 1x (evita loop)
+  if ((code === 4 || code === 3) && isVod && !saveCtx._handled) {
+    saveCtx._handled = true;
     const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
-    showBuffer('Tentando outra forma de tocar (convertendo no servidor)…');
-    destroyPlayers();
-    try { video.pause(); } catch {}
-    video.src = `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`; video.load(); video.play().catch(() => {});   // MP4 fragmentado toca direto
+    showBuffer('Verificando o conteúdo no provedor…');
+    let ok = false;
+    try { const r = await fetch(`/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`, { headers: { Range: 'bytes=0-1' }, cache: 'no-store' }); ok = r.status >= 200 && r.status < 400; } catch {}
+    if (!ok) { showError('🚫 Este conteúdo não está disponível no provedor (o link foi removido). Tente outra versão — as "4K" costumam sumir — ou outro título.'); return; }
+    // existe, mas o navegador não decodificou (HEVC/4K) → converte no servidor
+    saveCtx._tc = true;
+    showBuffer('Formato pesado — convertendo no servidor pra tocar aqui…');
+    destroyPlayers(); try { video.pause(); } catch {}
+    video.src = `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`; video.load(); video.play().catch(() => {});
     return;
   }
-  if (code === 4 || code === 3) {   // nem convertendo tocou
-    hideBuffer();
-    toast('Não rolou tocar esse conteúdo. Pode estar indisponível no provedor (versões 4K às vezes somem) ou ser pesado demais — tente a versão normal, sem 4K, ou baixe pra assistir.');
+  if (code === 4 || code === 3) {   // já tratou (ex.: até o transcode falhou)
+    showError('🚫 Não consegui tocar este conteúdo, nem convertendo. Pode estar indisponível no provedor ou ser pesado demais — tente a versão normal (sem 4K) ou baixe.');
     return;
   }
   reconnectStream();                // erro de rede → reconecta e volta de onde parou
