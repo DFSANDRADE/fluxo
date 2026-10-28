@@ -603,6 +603,34 @@ function analyzeBottleneck(r) {
   return { cause, verdict, actions, server: s };
 }
 
+// transcode HEVC/H265 -> H264 em tempo real. fmp4=true -> MP4 fragmentado (toca direto no <video>, pro VOD);
+// senão mpegts (pro ao vivo via mpegts.js). cap1080=true limita 4K a 1080p (alivia a CPU).
+function ffmpegTranscode(req, res, src, cap1080, fmp4) {
+  res.writeHead(200, { 'Content-Type': fmp4 ? 'video/mp4' : 'video/mp2t', 'Cache-Control': 'no-store' });
+  const vf = cap1080 ? ['-vf', "scale='min(1920,iw)':-2"] : [];
+  const out = fmp4
+    ? ['-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']
+    : ['-f', 'mpegts', '-muxdelay', '0', 'pipe:1'];
+  const ff = spawn('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error',
+    '-user_agent', UA, '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
+    '-rw_timeout', '15000000', '-fflags', '+genpts', '-i', src,
+    ...vf,
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
+    '-g', '50', '-b:v', '3500k', '-maxrate', '3500k', '-bufsize', '7000k',
+    '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+    ...out
+  ]);
+  transcodeCount++;
+  ff.stdout.pipe(res);
+  ff.stderr.resume();
+  let ended = false; const endOne = () => { if (!ended) { ended = true; transcodeCount = Math.max(0, transcodeCount - 1); } };
+  const kill = () => { try { ff.kill('SIGKILL'); } catch {} };
+  req.on('close', kill);
+  ff.on('error', () => { endOne(); try { res.end(); } catch {} });
+  ff.on('exit', () => { endOne(); try { res.end(); } catch {} });
+}
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
   const p = u.pathname;
@@ -891,26 +919,17 @@ const server = http.createServer((req, res) => {
   if ((m = p.match(/^\/stream\/live\/(\d+)$/))) return proxyStream(req, res, `${pv.base}/live/${pv.username}/${pv.password}/${m[1]}.ts`);
   // transcode ao vivo HEVC->H264 (pra canais [H265] tocarem em qualquer tela)
   if ((m = p.match(/^\/transcode\/live\/(\d+)$/))) {
-    const src = `${pv.base}/live/${pv.username}/${pv.password}/${m[1]}.ts`;
-    res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Cache-Control': 'no-store' });
-    const ff = spawn('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error',
-      '-user_agent', UA, '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
-      '-rw_timeout', '12000000', '-fflags', '+genpts', '-i', src,
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
-      '-g', '50', '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
-      '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
-      '-f', 'mpegts', '-muxdelay', '0', 'pipe:1'
-    ]);
-    transcodeCount++;
-    ff.stdout.pipe(res);
-    ff.stderr.resume();
-    let ended = false; const endOne = () => { if (!ended) { ended = true; transcodeCount = Math.max(0, transcodeCount - 1); } };
-    const kill = () => { try { ff.kill('SIGKILL'); } catch {} };
-    req.on('close', kill);
-    ff.on('error', () => { endOne(); try { res.end(); } catch {} });
-    ff.on('exit', () => { endOne(); try { res.end(); } catch {} });
-    return;
+    return ffmpegTranscode(req, res, `${pv.base}/live/${pv.username}/${pv.password}/${m[1]}.ts`, false);
+  }
+  // transcode de VOD HEVC/4K->H264 1080p em MP4 fragmentado (pro navegador/celular que não decodifica o original)
+  if ((m = p.match(/^\/transcode\/(movie|series)\/(\d+)\.([a-z0-9]+)$/i))) {
+    const src = `${pv.base}/${m[1]}/${pv.username}/${pv.password}/${m[2]}.${m[3]}`;
+    return openUpstream(src, {}, (err, up) => {   // checa se existe antes (muito 4K é link morto/404)
+      const bad = err || !up || !up.statusCode || up.statusCode >= 400;
+      try { if (up) { up.resume(); up.destroy(); } } catch {}
+      if (bad) { res.writeHead(502); return res.end('conteúdo indisponível no provedor'); }
+      ffmpegTranscode(req, res, src, true, true);
+    });
   }
   if ((m = p.match(/^\/stream\/movie\/(\d+)\.([a-z0-9]+)$/i))) {
     const dl = q.get('dl') ? { filename: `${sanitize(q.get('name') || 'filme')}.${m[2]}` } : undefined;

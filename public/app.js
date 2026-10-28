@@ -591,7 +591,8 @@ function reconnectStream() {
   const t = video.currentTime || saveCtx.resumePos || 0;
   const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
   const d = dlOf(kind, saveCtx.id);
-  const url = (d && d.status === 'done') ? `/dl/${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`;
+  const url = saveCtx._tc ? `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`   // se estava convertendo, reconecta no transcode
+    : (d && d.status === 'done') ? `/dl/${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`;
   showBuffer('Reconectando ao provedor…');
   setTimeout(() => { destroyPlayers(); video.src = url; video.load(); video.onloadedmetadata = () => { if (t > 3) video.currentTime = t; }; video.play().catch(() => {}); }, 800);
 }
@@ -651,15 +652,25 @@ function saveProgress() {
 }
 video.addEventListener('timeupdate', saveProgress);
 
-// mensagem clara quando o vídeo dá erro: codec não suportado (4K/HEVC/HDR) vs rede
+// erro de vídeo: se for codec não suportado (4K/HEVC), CONVERTE no servidor automaticamente; se for rede, reconecta
 function onVideoError() {
   const code = video.error && video.error.code;
-  if (code === 4 || code === 3) {   // formato/decodificação não suportado neste navegador
-    hideBuffer();
-    toast('Esse conteúdo não tocou aqui (pode ser 4K/HEVC/HDR que o navegador não decodifica). Tente outra versão ou baixe pra assistir.');
+  const isVod = saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series');
+  if ((code === 4 || code === 3) && isVod && !saveCtx._tc) {
+    saveCtx._tc = true;             // tenta converter 1x (evita loop)
+    const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
+    showBuffer('Tentando outra forma de tocar (convertendo no servidor)…');
+    destroyPlayers();
+    try { video.pause(); } catch {}
+    video.src = `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`; video.load(); video.play().catch(() => {});   // MP4 fragmentado toca direto
     return;
   }
-  reconnectStream();                // erro de rede → reconecta
+  if (code === 4 || code === 3) {   // nem convertendo tocou
+    hideBuffer();
+    toast('Não rolou tocar esse conteúdo. Pode estar indisponível no provedor (versões 4K às vezes somem) ou ser pesado demais — tente a versão normal, sem 4K, ou baixe pra assistir.');
+    return;
+  }
+  reconnectStream();                // erro de rede → reconecta e volta de onde parou
 }
 
 function playNative(url, name, resume) {
