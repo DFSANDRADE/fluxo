@@ -73,7 +73,13 @@
     <div class="playerbox">
       <video id="video" controls autoplay playsinline preload="auto"></video>
       <button id="compat" class="compat-btn" style="display:none">⚙ Compatibilidade</button>
-      <div class="buffering hidden" id="buffering"><div class="spin"></div><div class="buf-msg">Conectando ao provedor…</div></div>
+      <div class="buffering hidden" id="buffering">
+        <div class="ring" id="buf-ring">
+          <svg viewBox="0 0 64 64"><circle class="ring-bg" cx="32" cy="32" r="28"/><circle class="ring-fg" cx="32" cy="32" r="28"/></svg>
+          <div class="ring-pct" id="buf-pct"></div>
+        </div>
+        <div class="buf-msg">Conectando ao provedor…</div>
+      </div>
       <div class="nowplaying" id="nowplaying"></div>
       <div class="up-next hidden" id="upnext"></div>
     </div>

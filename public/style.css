@@ -215,9 +215,20 @@ body.lite .rowarrow{backdrop-filter:none;background:#1a1a22}
 /* indicador de buffer */
 .buffering{position:absolute;inset:0;display:grid;place-items:center;align-content:center;gap:16px;pointer-events:none}
 .buffering.hidden{display:none}
-.buf-msg{font-size:14px;color:#cfcfd8;font-weight:500;text-shadow:0 1px 6px rgba(0,0,0,.7);text-align:center;max-width:80%}
+.buf-msg{font-size:14px;color:#eaeaf2;font-weight:500;text-shadow:0 1px 6px rgba(0,0,0,.8);text-align:center;max-width:82%;line-height:1.4}
 .spin{width:52px;height:52px;border-radius:50%;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+/* rodinha de progresso (buffer/carregamento) com % no meio */
+.ring{position:relative;width:76px;height:76px}
+.ring svg{width:76px;height:76px;transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-width:5;stroke-linecap:round}
+.ring .ring-bg{stroke:rgba(255,255,255,.14)}
+.ring .ring-fg{stroke:#7c9cff;stroke-dasharray:176;stroke-dashoffset:176;transition:stroke-dashoffset .3s ease;filter:drop-shadow(0 0 6px rgba(124,156,255,.5))}
+.ring .ring-pct{position:absolute;inset:0;display:grid;place-items:center;font-size:16px;font-weight:700;color:#fff;text-shadow:0 1px 4px #000}
+.ring.spin-ring svg{animation:ringspin .9s linear infinite}
+.ring.spin-ring .ring-fg{stroke-dasharray:44 176;stroke-dashoffset:0;transition:none}
+@keyframes ringspin{from{transform:rotate(-90deg)}to{transform:rotate(270deg)}}
+body.lite .ring.spin-ring svg{animation-duration:1.3s}
 
 /* ====== MODO LEVE: desliga o que pesa em GPU fraca (TV / Mac antigo) ====== */
 body.lite #glow{display:none}
@@ -431,3 +442,7 @@ body.kid #setbtn{ display:none !important; }
   .search-row .card{width:calc(50% - 8px);flex:0 0 auto}
   .search-row .card.poster,.search-row .card.chan{width:calc(50% - 8px)}
 }
+
+/* aviso de carregamento do catálogo (home) */
+.home-loading{display:flex;flex-direction:column;align-items:center;gap:16px;padding:70px 20px;color:var(--muted);text-align:center;font-size:15px}
+.home-loading small{color:var(--dim);font-size:12.5px}

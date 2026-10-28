@@ -117,6 +117,11 @@ $('#tabs').addEventListener('click', e => {
 
 /* ---------- carregar aba ---------- */
 let loadSeq = 0;                              // cada troca de aba ganha um número; destaque antigo é descartado
+function homeLoading() {
+  const d = document.createElement('div'); d.className = 'home-loading';
+  d.innerHTML = '<div class="spin"></div><div>Carregando seu catálogo…<br><small>buscando filmes, séries e canais no provedor</small></div>';
+  return d;
+}
 async function loadTab() {
   const seq = ++loadSeq;
   const rows = $('#rows'); rows.innerHTML = '';
@@ -125,16 +130,21 @@ async function loadTab() {
   if (TYPE === 'live') await fetchEpgNow();   // guia carrega antes dos canais
   // linhas especiais (localStorage)
   renderSpecialRows(rows);
+  let loadingEl = null;
+  if (!rows.children.length) { loadingEl = homeLoading(); rows.appendChild(loadingEl); }   // tela vazia: avisa que está carregando
+  const clearLoading = () => { if (loadingEl) { loadingEl.remove(); loadingEl = null; } };
   let top = [];
   if (TYPE !== 'live') {
     try { const t = await api(`/api/top?type=${TYPE}&limit=24`); top = t.results || []; } catch {}
     if (top.length) {
+      clearLoading();
       top.forEach(r => INDEX[TYPE][r.id] = toItem(r));
       rows.appendChild(staticRow('⭐ Mais bem avaliados', top.map(r => makeCard(toItem(r), TYPE))));
     }
   }
   let cats = [];
   try { cats = await api(`/api/categories?type=${TYPE}`); } catch {}
+  clearLoading();
   if (!Array.isArray(cats) || !cats.length) {
     if (!rows.children.length) rows.innerHTML = '<div class="empty">Nada por aqui ainda.</div>';
     return;
@@ -544,15 +554,24 @@ $('#detail').onclick = (e) => { if (e.target.id === 'detail') $('#detail').class
 /* ---------- player ---------- */
 let mpg = null, hls = null;
 let saveCtx = null, saveT = 0, autoCacheT = null, retryN = 0;
+let preBuffering = false, preBufT = null;   // durante o pré-buffer o overlay é controlado pela rodinha
 const video = $('#video');
 
-// overlay de carregamento com texto claro (deixa evidente que a espera é do PROVEDOR, não do Fluxo)
+// overlay de carregamento com rodinha + texto claro (o usuário SEMPRE sabe o que está acontecendo)
 let bufT = null;
-function showBuffer(msg) {
+const RING_C = 2 * Math.PI * 28;   // circunferência da rodinha (r=28)
+function setRing(pct) {
+  const ring = $('#buf-ring'); if (!ring) return;
+  const fg = $('.ring-fg', ring), pe = $('#buf-pct');
+  if (pct == null) { ring.classList.add('spin-ring'); if (pe) pe.textContent = ''; }   // indeterminado (girando)
+  else { ring.classList.remove('spin-ring'); const p = Math.max(0, Math.min(100, Math.round(pct))); if (fg) fg.style.strokeDashoffset = (RING_C * (1 - p / 100)).toFixed(1); if (pe) pe.textContent = p + '%'; }
+}
+function showBuffer(msg, pct) {
   const b = $('#buffering'); b.classList.remove('hidden');
   const m = $('#buffering .buf-msg'); if (m) m.textContent = msg || 'Esperando o provedor…';
+  setRing(pct);   // pct undefined/null => rodinha girando
   clearTimeout(bufT);
-  bufT = setTimeout(() => { const mm = $('#buffering .buf-msg'); if (mm && !b.classList.contains('hidden')) mm.textContent = 'O provedor está lento — segurando a conexão…'; }, 8000);
+  if (pct == null) bufT = setTimeout(() => { const mm = $('#buffering .buf-msg'); if (mm && !b.classList.contains('hidden')) mm.textContent = 'O provedor está lento — segurando a conexão…'; }, 8000);
 }
 function hideBuffer() { $('#buffering').classList.add('hidden'); clearTimeout(bufT); }
 
@@ -570,17 +589,18 @@ function reconnectStream() {
 }
 
 video.addEventListener('waiting', () => {
+  if (preBuffering) return;                 // durante o pré-buffer a rodinha já manda
   showBuffer(); stallCount++;
   clearTimeout(stallT);
   if (saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series')) {   // travou e não anda? reconecta
     stallT = setTimeout(() => { if (!video.paused && Date.now() - lastProg > 11000) reconnectStream(); }, 12000);
   }
 });
-['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
-video.addEventListener('pause', () => { hideBuffer(); clearTimeout(stallT); });
+['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { if (!preBuffering) { hideBuffer(); clearTimeout(stallT); } }));
+video.addEventListener('pause', () => { if (!preBuffering) { hideBuffer(); clearTimeout(stallT); } });
 video.addEventListener('playing', () => { retryN = 0; });
 video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); });
-video.addEventListener('error', reconnectStream);
+video.addEventListener('error', () => { if (!preBuffering) reconnectStream(); });
 
 // cache TEMPORÁRIO (não cai no meio): após 30s assistindo, baixa pro servidor marcado como auto.
 // o servidor apaga esses sozinho depois de 24h — só os que o usuário clicar pra baixar ficam permanentes.
@@ -624,12 +644,40 @@ function saveProgress() {
 }
 video.addEventListener('timeupdate', saveProgress);
 
+// libera o autoplay usando o gesto do toque (mobile bloqueia play fora do gesto), mantendo PAUSADO durante o buffer
+function unlockAutoplay() {
+  try { const pr = video.play(); if (pr && pr.catch) pr.catch(() => {}); video.pause(); } catch {}
+}
+// segura o play até ter X segundos de buffer, mostrando a rodinha com % (troca "trava no meio" por "espera uns seg e roda liso")
+function preBufferThenPlay(targetSec, firstMsg) {
+  targetSec = targetSec || 5;
+  clearInterval(preBufT);
+  preBuffering = true;
+  unlockAutoplay();             // libera o autoplay no gesto e segura pausado
+  const started = Date.now();
+  showBuffer(firstMsg || 'Preparando o vídeo…', null);
+  const tick = () => {
+    if ($('#player').classList.contains('hidden')) { clearInterval(preBufT); preBufT = null; preBuffering = false; return; }  // fechou
+    let ahead = 0;
+    try { if (video.buffered.length) ahead = video.buffered.end(video.buffered.length - 1) - (video.currentTime || 0); } catch {}
+    const waited = Date.now() - started;
+    if (ahead > 0.2) showBuffer('Carregando buffer pra não travar… aguarde uns segundos', Math.min(99, Math.round(ahead / targetSec * 100)));
+    if (ahead >= targetSec || video.readyState >= 4 || (waited > 12000 && ahead > 1.2) || waited > 22000) {
+      clearInterval(preBufT); preBufT = null; preBuffering = false;
+      setRing(100); hideBuffer();
+      video.play().catch(() => showBuffer('Toque no ▶ para começar', 100));
+    }
+  };
+  preBufT = setInterval(tick, 250);
+  tick();
+}
+
 function playNative(url, name, resume) {
   destroyPlayers();
+  openPlayer(name);
   video.src = url; video.load();
   video.onloadedmetadata = () => { if (resume && resume > 5) video.currentTime = resume; };
-  video.play().catch(() => {});
-  openPlayer(name);
+  preBufferThenPlay(5);
 }
 
 function playVOD(id, ext, name, icon, resume) {
@@ -675,10 +723,11 @@ const canHEVC = () => video.canPlayType('video/mp4; codecs="hvc1"') !== '' || vi
 const isH265 = (it) => /h\.?\s?265|hevc/i.test(it.name || '');
 let currentLive = null, liveTC = false;
 
-function playViaMpegts(url, name) {
+function playViaMpegts(url, name, targetSec, msg) {
   if (window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
     mpg = mpegts.createPlayer({ type: 'mpegts', isLive: true, url });
-    mpg.attachMediaElement(video); mpg.load(); mpg.play().catch(() => {});
+    mpg.attachMediaElement(video); mpg.load();
+    preBufferThenPlay(targetSec || 4, msg || 'Preparando o canal…');
   } else playNative(url, name);
 }
 function updateCompat() {
@@ -706,18 +755,18 @@ function playLive(it, force) {
   });
   destroyPlayers();
   video.onended = null;
-  if (liveTC) { playViaMpegts(`/transcode/live/${it.stream_id}`, it.name); return; }
+  if (liveTC) { playViaMpegts(`/transcode/live/${it.stream_id}`, it.name, 6, 'Preparando o canal (modo compatibilidade)…'); return; }
   const hlsUrl = `/hls/live/${it.stream_id}.m3u8`;
   const tsUrl = `/stream/live/${it.stream_id}`;
-  if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = hlsUrl; video.load(); video.play().catch(() => {}); return; }
+  if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = hlsUrl; video.load(); preBufferThenPlay(3, 'Preparando o canal…'); return; }
   if (window.Hls && Hls.isSupported()) {
     hls = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 5, liveMaxLatencyDurationCount: 15, maxBufferLength: 40, maxMaxBufferLength: 120, backBufferLength: 30 });
     hls.loadSource(hlsUrl); hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+    hls.on(Hls.Events.MANIFEST_PARSED, () => preBufferThenPlay(3, 'Preparando o canal…'));
     hls.on(Hls.Events.ERROR, (_e, d) => { if (d && d.fatal) { try { hls.startLoad(); } catch {} } });
     return;
   }
-  playViaMpegts(tsUrl, it.name);
+  playViaMpegts(tsUrl, it.name, 4, 'Preparando o canal…');
 }
 
 /* ---------- botões de download no detalhe ---------- */
