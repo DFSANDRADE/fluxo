@@ -554,7 +554,6 @@ $('#detail').onclick = (e) => { if (e.target.id === 'detail') $('#detail').class
 /* ---------- player ---------- */
 let mpg = null, hls = null;
 let saveCtx = null, saveT = 0, autoCacheT = null, retryN = 0;
-let preBuffering = false, preBufT = null;   // durante o pré-buffer o overlay é controlado pela rodinha
 const video = $('#video');
 
 // overlay de carregamento com rodinha + texto claro (o usuário SEMPRE sabe o que está acontecendo)
@@ -566,14 +565,23 @@ function setRing(pct) {
   if (pct == null) { ring.classList.add('spin-ring'); if (pe) pe.textContent = ''; }   // indeterminado (girando)
   else { ring.classList.remove('spin-ring'); const p = Math.max(0, Math.min(100, Math.round(pct))); if (fg) fg.style.strokeDashoffset = (RING_C * (1 - p / 100)).toFixed(1); if (pe) pe.textContent = p + '%'; }
 }
-function showBuffer(msg, pct) {
+function showBuffer(msg) {
   const b = $('#buffering'); b.classList.remove('hidden');
   const m = $('#buffering .buf-msg'); if (m) m.textContent = msg || 'Esperando o provedor…';
-  setRing(pct);   // pct undefined/null => rodinha girando
   clearTimeout(bufT);
-  if (pct == null) bufT = setTimeout(() => { const mm = $('#buffering .buf-msg'); if (mm && !b.classList.contains('hidden')) mm.textContent = 'O provedor está lento — segurando a conexão…'; }, 8000);
+  bufT = setTimeout(() => { const mm = $('#buffering .buf-msg'); if (mm && !b.classList.contains('hidden')) mm.textContent = 'O provedor está lento — segurando a conexão… (ou o conteúdo é pesado/4K)'; }, 8000);
 }
-function hideBuffer() { $('#buffering').classList.add('hidden'); clearTimeout(bufT); }
+function hideBuffer() { $('#buffering').classList.add('hidden'); clearTimeout(bufT); clearInterval(bufMon); bufMon = null; }
+// enquanto o overlay está visível, a rodinha mostra % do buffer (ou gira se ainda não tem dados)
+let bufMon = null;
+function startBufMon() {
+  clearInterval(bufMon);
+  bufMon = setInterval(() => {
+    if ($('#buffering').classList.contains('hidden')) return;
+    let ahead = 0; try { if (video.buffered.length) ahead = video.buffered.end(video.buffered.length - 1) - (video.currentTime || 0); } catch {}
+    setRing(ahead > 0.4 ? Math.min(99, Math.round(ahead / 4 * 100)) : null);
+  }, 350);
+}
 
 // reconecta filme/episódio no ponto atual (usado em erro E em travamento prolongado)
 let stallT = null, lastProg = 0, stallCount = 0;
@@ -589,18 +597,17 @@ function reconnectStream() {
 }
 
 video.addEventListener('waiting', () => {
-  if (preBuffering) return;                 // durante o pré-buffer a rodinha já manda
-  showBuffer(); stallCount++;
+  showBuffer('Carregando buffer…'); stallCount++;
   clearTimeout(stallT);
   if (saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series')) {   // travou e não anda? reconecta
     stallT = setTimeout(() => { if (!video.paused && Date.now() - lastProg > 11000) reconnectStream(); }, 12000);
   }
 });
-['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { if (!preBuffering) { hideBuffer(); clearTimeout(stallT); } }));
-video.addEventListener('pause', () => { if (!preBuffering) { hideBuffer(); clearTimeout(stallT); } });
+['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
+video.addEventListener('pause', () => { if (video.readyState > 2) hideBuffer(); clearTimeout(stallT); });
 video.addEventListener('playing', () => { retryN = 0; });
 video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); });
-video.addEventListener('error', () => { if (!preBuffering) reconnectStream(); });
+video.addEventListener('error', onVideoError);
 
 // cache TEMPORÁRIO (não cai no meio): após 30s assistindo, baixa pro servidor marcado como auto.
 // o servidor apaga esses sozinho depois de 24h — só os que o usuário clicar pra baixar ficam permanentes.
@@ -615,14 +622,14 @@ function destroyPlayers() {
   if (mpg) { try { mpg.destroy(); } catch {} mpg = null; }
   if (hls) { try { hls.destroy(); } catch {} hls = null; }
 }
-function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); const cb = $('#compat'); if (cb) cb.style.display = 'none'; $('#player').classList.remove('hidden'); showBuffer('Conectando ao provedor…'); }
+function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); const cb = $('#compat'); if (cb) cb.style.display = 'none'; $('#player').classList.remove('hidden'); showBuffer('Conectando ao provedor…'); startBufMon(); }
 function closePlayer() {
   $('#player').classList.add('hidden');
   try { video.pause(); } catch {}
   destroyPlayers();
   clearTimeout(autoCacheT);
   video.removeAttribute('src'); video.load(); saveCtx = null;
-  $('#buffering').classList.add('hidden');
+  hideBuffer();
 }
 document.querySelector('[data-close-player]').onclick = closePlayer;
 $('#compat')?.addEventListener('click', () => { if (currentLive) playLive(currentLive, !liveTC); });
@@ -644,40 +651,23 @@ function saveProgress() {
 }
 video.addEventListener('timeupdate', saveProgress);
 
-// libera o autoplay usando o gesto do toque (mobile bloqueia play fora do gesto), mantendo PAUSADO durante o buffer
-function unlockAutoplay() {
-  try { const pr = video.play(); if (pr && pr.catch) pr.catch(() => {}); video.pause(); } catch {}
-}
-// segura o play até ter X segundos de buffer, mostrando a rodinha com % (troca "trava no meio" por "espera uns seg e roda liso")
-function preBufferThenPlay(targetSec, firstMsg) {
-  targetSec = targetSec || 5;
-  clearInterval(preBufT);
-  preBuffering = true;
-  unlockAutoplay();             // libera o autoplay no gesto e segura pausado
-  const started = Date.now();
-  showBuffer(firstMsg || 'Preparando o vídeo…', null);
-  const tick = () => {
-    if ($('#player').classList.contains('hidden')) { clearInterval(preBufT); preBufT = null; preBuffering = false; return; }  // fechou
-    let ahead = 0;
-    try { if (video.buffered.length) ahead = video.buffered.end(video.buffered.length - 1) - (video.currentTime || 0); } catch {}
-    const waited = Date.now() - started;
-    if (ahead > 0.2) showBuffer('Carregando buffer pra não travar… aguarde uns segundos', Math.min(99, Math.round(ahead / targetSec * 100)));
-    if (ahead >= targetSec || video.readyState >= 4 || (waited > 12000 && ahead > 1.2) || waited > 22000) {
-      clearInterval(preBufT); preBufT = null; preBuffering = false;
-      setRing(100); hideBuffer();
-      video.play().catch(() => showBuffer('Toque no ▶ para começar', 100));
-    }
-  };
-  preBufT = setInterval(tick, 250);
-  tick();
+// mensagem clara quando o vídeo dá erro: codec não suportado (4K/HEVC/HDR) vs rede
+function onVideoError() {
+  const code = video.error && video.error.code;
+  if (code === 4 || code === 3) {   // formato/decodificação não suportado neste navegador
+    hideBuffer();
+    toast('Esse conteúdo não tocou aqui (pode ser 4K/HEVC/HDR que o navegador não decodifica). Tente outra versão ou baixe pra assistir.');
+    return;
+  }
+  reconnectStream();                // erro de rede → reconecta
 }
 
 function playNative(url, name, resume) {
   destroyPlayers();
-  openPlayer(name);
+  openPlayer(name);                 // mostra a rodinha "Conectando ao provedor…" até tocar
   video.src = url; video.load();
   video.onloadedmetadata = () => { if (resume && resume > 5) video.currentTime = resume; };
-  preBufferThenPlay(5);
+  video.play().catch(() => {});     // toca na hora (usa o gesto do toque = funciona no Brave/mobile)
 }
 
 function playVOD(id, ext, name, icon, resume) {
@@ -726,8 +716,7 @@ let currentLive = null, liveTC = false;
 function playViaMpegts(url, name, targetSec, msg) {
   if (window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
     mpg = mpegts.createPlayer({ type: 'mpegts', isLive: true, url });
-    mpg.attachMediaElement(video); mpg.load();
-    preBufferThenPlay(targetSec || 4, msg || 'Preparando o canal…');
+    mpg.attachMediaElement(video); mpg.load(); mpg.play().catch(() => {});
   } else playNative(url, name);
 }
 function updateCompat() {
@@ -755,18 +744,18 @@ function playLive(it, force) {
   });
   destroyPlayers();
   video.onended = null;
-  if (liveTC) { playViaMpegts(`/transcode/live/${it.stream_id}`, it.name, 6, 'Preparando o canal (modo compatibilidade)…'); return; }
+  if (liveTC) { playViaMpegts(`/transcode/live/${it.stream_id}`, it.name); return; }
   const hlsUrl = `/hls/live/${it.stream_id}.m3u8`;
   const tsUrl = `/stream/live/${it.stream_id}`;
-  if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = hlsUrl; video.load(); preBufferThenPlay(3, 'Preparando o canal…'); return; }
+  if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = hlsUrl; video.load(); video.play().catch(() => {}); return; }
   if (window.Hls && Hls.isSupported()) {
     hls = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 5, liveMaxLatencyDurationCount: 15, maxBufferLength: 40, maxMaxBufferLength: 120, backBufferLength: 30 });
     hls.loadSource(hlsUrl); hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => preBufferThenPlay(3, 'Preparando o canal…'));
+    hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
     hls.on(Hls.Events.ERROR, (_e, d) => { if (d && d.fatal) { try { hls.startLoad(); } catch {} } });
     return;
   }
-  playViaMpegts(tsUrl, it.name, 4, 'Preparando o canal…');
+  playViaMpegts(tsUrl, it.name);
 }
 
 /* ---------- botões de download no detalhe ---------- */
