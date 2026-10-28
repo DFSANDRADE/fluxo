@@ -382,9 +382,19 @@ const cardFromFav = (f) => makeCard(INDEX[f.type][f.id] || { stream_id: f.type !
 const cardFromCont = (c) => {
   const type = c.type === 'series' ? 'series' : 'vod';
   const card = makeCard({ stream_id: c.id, series_id: c.sid, name: c.name, stream_icon: c.icon, cover: c.icon }, type);
-  card.onclick = () => c.type === 'movie' ? playVOD(c.id, c.ext, c.name, c.icon, c.pos) : openSeries({ series_id: c.sid, name: c.name });
+  card.onclick = () => c.type === 'movie' ? playVOD(c.id, c.ext, c.name, c.icon, c.pos) : resumeSeriesCont(c);
   return card;
 };
+// "continuar assistindo" de série: toca o EPISÓDIO salvo direto, retomando a posição (síncrono = funciona no mobile)
+function resumeSeriesCont(c) {
+  const name = c.name || 'Episódio';
+  const ext = c.ext || 'mp4';
+  saveCtx = { type: 'series', id: c.id, sid: c.sid, ext, name, icon: c.icon, resumePos: c.pos || 0 };
+  recordWatch('series', c.sid || c.id, name, c.icon);
+  const d = dlOf('series', c.id);
+  const url = (d && d.status === 'done') ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/series/${c.id}.${ext}`;
+  playNative(url, name, c.pos || 0);
+}
 
 /* ---------- favoritos ---------- */
 function toggleFav(it, type, btn) {
@@ -778,7 +788,7 @@ function renderDownloads() {
 }
 function playFromHistory(h) {
   if (h.type === 'movie') { const d = dlOf('movie', h.id); playVOD(h.id, (d && d.ext) || 'mp4', h.name, h.icon); }
-  else if (h.type === 'series') openSeries({ series_id: h.id, name: h.name });
+  else if (h.type === 'series') { const c = CONT['series:' + h.id]; if (c && c.pos) resumeSeriesCont(c); else openSeries({ series_id: h.id, name: h.name }); }
   else if (h.type === 'live') playLive(INDEX.live[h.id] || { stream_id: h.id, name: h.name, stream_icon: h.icon });
   else { saveCtx = null; playNative(`/local?f=${encodeURIComponent(h.id)}`, h.name); }
 }
@@ -843,7 +853,7 @@ async function fillSection(source, q, ph, label, seq) {
 }
 function cardsSection(label, cards, srcType) {
   const row = document.createElement('section');
-  row.className = 'row ' + (srcType === 'live' ? 'live' : 'vod');
+  row.className = 'row search-row ' + (srcType === 'live' ? 'live' : 'vod');
   row.innerHTML = `<div class="row-head"><h3>${label}</h3><span class="count">${cards.length}</span></div>
     <button class="rowarrow left" aria-label="Anterior">‹</button>
     <div class="cards"></div>

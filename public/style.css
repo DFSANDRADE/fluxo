@@ -424,3 +424,10 @@ body.kid #setbtn{ display:none !important; }
 .diag-actions .btn{width:100%;justify-content:center}
 .diag-spin{display:grid;place-items:center;padding:30px}
 @media (max-width:640px){ .diag-metrics{grid-template-columns:1fr} }
+
+/* busca no mobile: resultados em GRADE (não corta mais nem precisa arrastar) */
+@media (max-width:640px){
+  .search-row .cards{flex-wrap:wrap;overflow-x:visible;padding-bottom:4px}
+  .search-row .card{width:calc(50% - 8px);flex:0 0 auto}
+  .search-row .card.poster,.search-row .card.chan{width:calc(50% - 8px)}
+}

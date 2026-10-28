@@ -589,12 +589,12 @@ function analyzeBottleneck(r) {
     cause = 'provider_api'; verdict = 'O provedor está demorando MUITO pra responder (pode estar instável/fora do ar).'; actions = hasAlt ? [A.switchpv, A.reconnect] : [A.reconnect, A.reload];
   } else if (s.providerSpeedMBs != null && s.providerSpeedMBs > 0 && s.providerSpeedMBs < 1.2) {
     cause = 'provider_slow'; verdict = `O provedor está lento (${s.providerSpeedMBs} MB/s do servidor). O gargalo é o provedor/CDN.`; actions = hasAlt ? [A.switchpv, A.reconnect] : [A.reconnect];
-  } else if (c.liveTC && s.loadPerCore > 2.5) {
-    cause = 'transcode'; verdict = 'O transcode (canal H265) está pesando o servidor. Tente um canal normal ou aguarde.'; actions = [A.reconnect, A.restart];
+  } else if (s.transcodes > 0 && s.loadPerCore > 2.5) {
+    cause = 'transcode'; verdict = `O transcode de ${s.transcodes} canal(is) H265 está pesando o servidor. Tente um canal normal (sem [H265]).`; actions = [A.reconnect, A.restart];
   } else if (s.activeDownloads >= 3) {
     cause = 'downloads'; verdict = `${s.activeDownloads} downloads ao mesmo tempo estão saturando a banda.`; actions = [A.reconnect];
   } else if (s.loadPerCore > 3) {
-    cause = 'server_load'; verdict = 'O servidor está sobrecarregado.'; actions = [A.reconnect, A.restart];
+    cause = 'server_load'; verdict = 'O servidor (ou o host Proxmox) está sobrecarregado — pode ser outra VM/backup rodando, não necessariamente o Fluxo. Reiniciar o Fluxo só ajuda se o peso for dele.'; actions = [A.reconnect, A.restart];
   } else if ((s.providerSpeedMBs == null || s.providerSpeedMBs >= 2) && (c.stalls > 0 || c.bufferedAhead < 2 || c.videoErr)) {
     cause = 'client'; verdict = 'O servidor puxa bem do provedor, então o gargalo é a SUA rede (wifi/Tailscale) ou o aparelho.'; actions = c.liveTC ? [A.reconnect, A.clean] : [A.reconnect, A.compat, A.clean];
   } else {
