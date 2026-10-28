@@ -788,7 +788,7 @@ function renderDownloads() {
 }
 function playFromHistory(h) {
   if (h.type === 'movie') { const d = dlOf('movie', h.id); playVOD(h.id, (d && d.ext) || 'mp4', h.name, h.icon); }
-  else if (h.type === 'series') { const c = CONT['series:' + h.id]; if (c && c.pos) resumeSeriesCont(c); else openSeries({ series_id: h.id, name: h.name }); }
+  else if (h.type === 'series') { const c = CONT['series:' + h.id]; resumeSeriesCont((c && c.id) ? c : { id: h.id, sid: h.sid, name: h.name, icon: h.icon, ext: 'mp4', pos: 0 }); }
   else if (h.type === 'live') playLive(INDEX.live[h.id] || { stream_id: h.id, name: h.name, stream_icon: h.icon });
   else { saveCtx = null; playNative(`/local?f=${encodeURIComponent(h.id)}`, h.name); }
 }
