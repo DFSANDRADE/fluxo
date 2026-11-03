@@ -564,18 +564,23 @@ let epNav = null;   // {list, idx, seriesName, bg} quando tá tocando episódio 
 
 function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
 function updateEpNav() {
-  const bar = $('#epnav'); if (!bar) return;
-  // só em série, com lista, e fora de tela cheia (em fullscreen os controles nativos já mandam)
-  if (!epNav || !epNav.list || epNav.list.length < 2 || isFullscreen()) { bar.classList.add('hidden'); return; }
+  const un = $('#upnext'); if (!un) return;
+  // caixa de "próximo episódio" + botões ⏮⏭ num grupo só; some em tela cheia (controles nativos assumem)
+  if (!epNav || !epNav.list || isFullscreen()) { un.classList.add('hidden'); return; }
   const { list, idx, seriesName, bg, sid } = epNav;
   const prev = list[idx - 1], next = list[idx + 1];
-  if (!prev && !next) { bar.classList.add('hidden'); return; }
-  bar.innerHTML =
+  if (!prev && !next) { un.classList.add('hidden'); return; }
+  const head = next
+    ? `<div class="l">Próximo episódio</div><div class="t">E${next.episode_num} · ${esc(next.title || '')}</div>`
+    : `<div class="l">Fim da temporada</div><div class="t">Último episódio</div>`;
+  un.innerHTML = head +
+    `<div class="epbtns">` +
     `<button id="ep-prev"${prev ? '' : ' disabled'} title="Episódio anterior"><span class="ic">⏮</span> Anterior</button>` +
-    `<button id="ep-next"${next ? '' : ' disabled'} title="Próximo episódio">Próximo <span class="ic">⏭</span></button>`;
+    `<button id="ep-next"${next ? '' : ' disabled'} title="Próximo episódio">Próximo <span class="ic">⏭</span></button>` +
+    `</div>`;
   if (prev) $('#ep-prev').onclick = () => playEpisode(prev, list, idx - 1, seriesName, bg, sid, prev.season);
   if (next) $('#ep-next').onclick = () => playEpisode(next, list, idx + 1, seriesName, bg, sid, next.season);
-  bar.classList.remove('hidden');
+  un.classList.remove('hidden');
 }
 document.addEventListener('fullscreenchange', updateEpNav);
 document.addEventListener('webkitfullscreenchange', updateEpNav);
@@ -758,21 +763,10 @@ function playEpisode(ep, list, idx, seriesName, bg, seriesId, season) {
   const url = (d && d.status === 'done') ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/series/${ep.id}.${ext}`;
   playNative(url, name, resume);
   scheduleAutoCache('series', ep.id, ext, `${seriesName} E${ep.episode_num}`, bg);
-  epNav = { list, idx, seriesName, bg, sid }; updateEpNav();   // botões ⏮ anterior / próximo ⏭ (fora de tela cheia)
+  epNav = { list, idx, seriesName, bg, sid }; updateEpNav();   // caixa de próximo + botões ⏮⏭ (fora de tela cheia)
   const next = list[idx + 1];
-  const un = $('#upnext');
-  video.onended = () => {
-    if (!next) { un.classList.add('hidden'); return; }
-    playEpisode(next, list, idx + 1, seriesName, bg, seriesId, season);
-  };
-  video.ontimeupdate = () => {
-    saveProgress();
-    if (next && video.duration && video.duration - video.currentTime < 25) {
-      un.classList.remove('hidden');
-      un.innerHTML = `<div class="l">Próximo episódio</div><div class="t">E${next.episode_num} · ${esc(next.title || '')}</div><button>Assistir agora</button>`;
-      un.querySelector('button').onclick = () => playEpisode(next, list, idx + 1, seriesName, bg, seriesId, season);
-    } else un.classList.add('hidden');
-  };
+  video.onended = () => { if (next) playEpisode(next, list, idx + 1, seriesName, bg, seriesId, season); };
+  video.ontimeupdate = () => { saveProgress(); };
 }
 
 const canHEVC = () => video.canPlayType('video/mp4; codecs="hvc1"') !== '' || video.canPlayType('video/mp4; codecs="hev1"') !== '';
