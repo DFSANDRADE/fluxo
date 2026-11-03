@@ -554,6 +554,25 @@ $('#detail').onclick = (e) => { if (e.target.id === 'detail') $('#detail').class
 /* ---------- player ---------- */
 let mpg = null, hls = null;
 let saveCtx = null, saveT = 0, autoCacheT = null, retryN = 0;
+let epNav = null;   // {list, idx, seriesName, bg} quando tá tocando episódio de série
+
+function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+function updateEpNav() {
+  const bar = $('#epnav'); if (!bar) return;
+  // só em série, com lista, e fora de tela cheia (em fullscreen os controles nativos já mandam)
+  if (!epNav || !epNav.list || epNav.list.length < 2 || isFullscreen()) { bar.classList.add('hidden'); return; }
+  const { list, idx, seriesName, bg } = epNav;
+  const prev = list[idx - 1], next = list[idx + 1];
+  if (!prev && !next) { bar.classList.add('hidden'); return; }
+  bar.innerHTML =
+    `<button id="ep-prev"${prev ? '' : ' disabled'} title="Episódio anterior"><span class="ic">⏮</span> Anterior</button>` +
+    `<button id="ep-next"${next ? '' : ' disabled'} title="Próximo episódio">Próximo <span class="ic">⏭</span></button>`;
+  if (prev) $('#ep-prev').onclick = () => playEpisode(prev, list, idx - 1, seriesName, bg);
+  if (next) $('#ep-next').onclick = () => playEpisode(next, list, idx + 1, seriesName, bg);
+  bar.classList.remove('hidden');
+}
+document.addEventListener('fullscreenchange', updateEpNav);
+document.addEventListener('webkitfullscreenchange', updateEpNav);
 const video = $('#video');
 
 // overlay de carregamento com rodinha + texto claro (o usuário SEMPRE sabe o que está acontecendo)
@@ -623,7 +642,7 @@ function destroyPlayers() {
   if (mpg) { try { mpg.destroy(); } catch {} mpg = null; }
   if (hls) { try { hls.destroy(); } catch {} hls = null; }
 }
-function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); const cb = $('#compat'); if (cb) cb.style.display = 'none'; const rg = $('#buf-ring'); if (rg) rg.style.display = ''; $('#player').classList.remove('hidden'); showBuffer('Conectando ao provedor…'); startBufMon(); }
+function openPlayer(name) { $('#nowplaying').textContent = name || ''; $('#upnext').classList.add('hidden'); epNav = null; updateEpNav(); const cb = $('#compat'); if (cb) cb.style.display = 'none'; const rg = $('#buf-ring'); if (rg) rg.style.display = ''; $('#player').classList.remove('hidden'); showBuffer('Conectando ao provedor…'); startBufMon(); }
 function closePlayer() {
   $('#player').classList.add('hidden');
   try { video.pause(); } catch {}
@@ -715,6 +734,7 @@ function playEpisode(ep, list, idx, seriesName, bg) {
   const url = (d && d.status === 'done') ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/series/${ep.id}.${ext}`;
   playNative(url, name, resume);
   scheduleAutoCache('series', ep.id, ext, `${seriesName} E${ep.episode_num}`, bg);
+  epNav = { list, idx, seriesName, bg }; updateEpNav();   // botões ⏮ anterior / próximo ⏭ (fora de tela cheia)
   const next = list[idx + 1];
   const un = $('#upnext');
   video.onended = () => {
