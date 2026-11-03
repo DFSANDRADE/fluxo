@@ -17,6 +17,7 @@ const store = {
 };
 let FAV = store.get('fav', []);
 let HITS = store.get('hits', {});
+let EPMAP = store.get('epmap', {});   // episode_id -> {sid, season} p/ remontar ⏮⏭ vindo do histórico
 let CONT = store.get('cont', {});
 let WATCHED = store.get('watched', []);             // histórico de assistidos (recente primeiro)
 let DL = {};                                        // key "type:id" -> {status,file,received,total,...}
@@ -43,10 +44,10 @@ async function loadState() {
   store.set('fav', FAV); store.set('hits', HITS); store.set('cont', CONT); store.set('watched', WATCHED);
 }
 
-function recordWatch(type, id, name, icon) {
+function recordWatch(type, id, name, icon, sid) {
   const key = type + ':' + id;
   WATCHED = WATCHED.filter(w => w.key !== key);
-  WATCHED.unshift({ key, type, id, name, icon, at: Date.now() });
+  WATCHED.unshift({ key, type, id, name, icon, sid, at: Date.now() });
   WATCHED = WATCHED.slice(0, 150);
   store.set('watched', WATCHED); pushState();
 }
@@ -400,10 +401,13 @@ function resumeSeriesCont(c) {
   const name = c.name || 'Episódio';
   const ext = c.ext || 'mp4';
   saveCtx = { type: 'series', id: c.id, sid: c.sid, ext, name, icon: c.icon, resumePos: c.pos || 0 };
-  recordWatch('series', c.sid || c.id, name, c.icon);
+  recordWatch('series', c.sid || c.id, name, c.icon, c.sid);
   const d = dlOf('series', c.id);
   const url = (d && d.status === 'done') ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/series/${c.id}.${ext}`;
   playNative(url, name, c.pos || 0);
+  // remonta os botões ⏮⏭ buscando a temporada no provedor (precisa do id da série)
+  const sid = c.sid || (EPMAP[c.id] && EPMAP[c.id].sid);
+  if (sid) buildEpNavFromEpisode(sid, c.id, name, c.icon);
 }
 
 /* ---------- favoritos ---------- */
@@ -469,7 +473,7 @@ async function openSeries(it) {
   const sbox = $('#d-seasons'); sbox.innerHTML = '';
   const show = (s) => {
     [...sbox.children].forEach(p => p.classList.toggle('active', p.dataset.s === s));
-    renderEpisodes(eps[s] || [], it.name || info.name, bg, s);
+    renderEpisodes(eps[s] || [], it.name || info.name, bg, s, id);
   };
   seasons.forEach((s, i) => {
     const pill = document.createElement('button'); pill.className = 'season-pill' + (i === 0 ? ' active' : '');
@@ -477,11 +481,11 @@ async function openSeries(it) {
   });
   setFav(it, 'series');
   wireDownloadButtons(null, 0, '', '', '', false);  // séries: download é por episódio
-  $('#d-play').onclick = () => { const first = (eps[seasons[0]] || [])[0]; if (first) playEpisode(first, eps[seasons[0]], 0, it.name || info.name, bg); };
-  if (seasons.length) renderEpisodes(eps[seasons[0]], it.name || info.name, bg, seasons[0]);
+  $('#d-play').onclick = () => { const first = (eps[seasons[0]] || [])[0]; if (first) playEpisode(first, eps[seasons[0]], 0, it.name || info.name, bg, id, seasons[0]); };
+  if (seasons.length) renderEpisodes(eps[seasons[0]], it.name || info.name, bg, seasons[0], id);
 }
 
-function renderEpisodes(list, seriesName, bg, season) {
+function renderEpisodes(list, seriesName, bg, season, seriesId) {
   const box = $('#d-episodes'); box.innerHTML = '';
   (list || []).forEach((ep, i) => {
     const info = ep.info || {};
@@ -489,6 +493,7 @@ function renderEpisodes(list, seriesName, bg, season) {
     const d = dlOf('series', ep.id);
     const dlTxt = d ? (d.status === 'done' ? '✓' : (d.status === 'error' ? '↻' : pct(d) + '%')) : '⬇';
     const se = ep.season || season || '1';
+    if (seriesId) EPMAP[ep.id] = { sid: seriesId, season: se };   // guarda p/ remontar ⏮⏭ depois (histórico)
     const phLabel = `T${se}<br>E${ep.episode_num}`;   // placeholder quando não tem capa do episódio
     const row = document.createElement('div'); row.className = 'ep';
     row.innerHTML = `<img class="thumb" src="${img(info.movie_image)}" alt="">
@@ -500,12 +505,13 @@ function renderEpisodes(list, seriesName, bg, season) {
     const toPh = () => { const p = document.createElement('div'); p.className = 'thumb noimg'; p.innerHTML = `<span class="ph">${phLabel}</span>`; thumb.replaceWith(p); };
     thumb.onerror = toPh;
     if (!info.movie_image) toPh();
-    row.onclick = () => playEpisode(ep, list, i, seriesName, bg);
+    row.onclick = () => playEpisode(ep, list, i, seriesName, bg, seriesId, ep.season || season);
     const srv = row.querySelector('[data-srv]');
     srv.onclick = (e) => { e.stopPropagation(); srvDownload('series', ep.id, ext, `${seriesName} E${ep.episode_num}`, info.movie_image || bg).then(() => { srv.textContent = '…'; toast('Baixando episódio'); startDLPolling(); }); };
     row.querySelector('[data-dev]').onclick = (e) => { e.stopPropagation(); deviceDownload('series', ep.id, ext, `${seriesName} E${ep.episode_num}`); };
     box.appendChild(row);
   });
+  store.set('epmap', EPMAP);
 }
 
 const castInitials = (n) => { const w = n.split(/\s+/).filter(Boolean); return ((w[0] ? w[0][0] : '') + (w[1] ? w[1][0] : '')).toUpperCase() || '?'; };
@@ -561,18 +567,34 @@ function updateEpNav() {
   const bar = $('#epnav'); if (!bar) return;
   // só em série, com lista, e fora de tela cheia (em fullscreen os controles nativos já mandam)
   if (!epNav || !epNav.list || epNav.list.length < 2 || isFullscreen()) { bar.classList.add('hidden'); return; }
-  const { list, idx, seriesName, bg } = epNav;
+  const { list, idx, seriesName, bg, sid } = epNav;
   const prev = list[idx - 1], next = list[idx + 1];
   if (!prev && !next) { bar.classList.add('hidden'); return; }
   bar.innerHTML =
     `<button id="ep-prev"${prev ? '' : ' disabled'} title="Episódio anterior"><span class="ic">⏮</span> Anterior</button>` +
     `<button id="ep-next"${next ? '' : ' disabled'} title="Próximo episódio">Próximo <span class="ic">⏭</span></button>`;
-  if (prev) $('#ep-prev').onclick = () => playEpisode(prev, list, idx - 1, seriesName, bg);
-  if (next) $('#ep-next').onclick = () => playEpisode(next, list, idx + 1, seriesName, bg);
+  if (prev) $('#ep-prev').onclick = () => playEpisode(prev, list, idx - 1, seriesName, bg, sid, prev.season);
+  if (next) $('#ep-next').onclick = () => playEpisode(next, list, idx + 1, seriesName, bg, sid, next.season);
   bar.classList.remove('hidden');
 }
 document.addEventListener('fullscreenchange', updateEpNav);
 document.addEventListener('webkitfullscreenchange', updateEpNav);
+// busca a temporada no provedor e, achando o episódio atual, liga os botões ⏮⏭
+async function buildEpNavFromEpisode(sid, episodeId, seriesName, bg) {
+  try {
+    const d = await api(`/api/series?id=${sid}`);
+    const eps = (d && d.episodes) || {};
+    for (const s of Object.keys(eps)) {
+      const list = eps[s] || [];
+      const idx = list.findIndex(ep => String(ep.id) === String(episodeId));
+      if (idx >= 0) {
+        if (!saveCtx || String(saveCtx.id) !== String(episodeId)) return;   // já trocou de vídeo nesse meio tempo
+        epNav = { list, idx, seriesName, bg, sid }; updateEpNav();
+        return;
+      }
+    }
+  } catch {}
+}
 const video = $('#video');
 
 // overlay de carregamento com rodinha + texto claro (o usuário SEMPRE sabe o que está acontecendo)
@@ -724,29 +746,31 @@ function playVOD(id, ext, name, icon, resume) {
   scheduleAutoCache('movie', id, ext, name, icon || item.stream_icon);
 }
 
-function playEpisode(ep, list, idx, seriesName, bg) {
+function playEpisode(ep, list, idx, seriesName, bg, seriesId, season) {
   const ext = ep.container_extension || 'mp4';
   const name = `${seriesName} · E${ep.episode_num} ${ep.title || ''}`;
   const c = CONT['series:' + ep.id]; const resume = c && c.pos ? c.pos : 0;
-  saveCtx = { type: 'series', id: ep.id, sid: ep.series_id, ext, name: seriesName, icon: bg, resumePos: resume };
-  recordWatch('series', ep.series_id || ep.id, seriesName, bg);
+  const sid = seriesId || ep.series_id;
+  saveCtx = { type: 'series', id: ep.id, sid, ext, name: seriesName, icon: bg, resumePos: resume };
+  recordWatch('series', ep.series_id || ep.id, seriesName, bg, sid);
+  if (sid) { EPMAP[ep.id] = { sid, season: ep.season || season }; store.set('epmap', EPMAP); }
   const d = dlOf('series', ep.id);
   const url = (d && d.status === 'done') ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/series/${ep.id}.${ext}`;
   playNative(url, name, resume);
   scheduleAutoCache('series', ep.id, ext, `${seriesName} E${ep.episode_num}`, bg);
-  epNav = { list, idx, seriesName, bg }; updateEpNav();   // botões ⏮ anterior / próximo ⏭ (fora de tela cheia)
+  epNav = { list, idx, seriesName, bg, sid }; updateEpNav();   // botões ⏮ anterior / próximo ⏭ (fora de tela cheia)
   const next = list[idx + 1];
   const un = $('#upnext');
   video.onended = () => {
     if (!next) { un.classList.add('hidden'); return; }
-    playEpisode(next, list, idx + 1, seriesName, bg);
+    playEpisode(next, list, idx + 1, seriesName, bg, seriesId, season);
   };
   video.ontimeupdate = () => {
     saveProgress();
     if (next && video.duration && video.duration - video.currentTime < 25) {
       un.classList.remove('hidden');
       un.innerHTML = `<div class="l">Próximo episódio</div><div class="t">E${next.episode_num} · ${esc(next.title || '')}</div><button>Assistir agora</button>`;
-      un.querySelector('button').onclick = () => playEpisode(next, list, idx + 1, seriesName, bg);
+      un.querySelector('button').onclick = () => playEpisode(next, list, idx + 1, seriesName, bg, seriesId, season);
     } else un.classList.add('hidden');
   };
 }
@@ -829,7 +853,7 @@ function renderDownloads() {
   const box = $('#dl-list');
   const active = Object.values(DL).filter(d => d.status === 'downloading' || d.status === 'error');
   const hist = {};
-  WATCHED.forEach(w => { hist[w.key] = { key: w.key, type: w.type, id: w.id, name: w.name, icon: w.icon, at: w.at, watched: true }; });
+  WATCHED.forEach(w => { hist[w.key] = { key: w.key, type: w.type, id: w.id, name: w.name, icon: w.icon, sid: w.sid, at: w.at, watched: true }; });
   Object.values(DL).filter(d => d.status === 'done').forEach(d => {
     const t = d.type === 'movie' ? 'movie' : 'series', key = t + ':' + d.id;
     const h = hist[key] || { key, type: t, id: d.id, name: d.name, icon: d.icon, at: d.at || 0 };
