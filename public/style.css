@@ -185,7 +185,7 @@ body.lite .rowarrow{backdrop-filter:none;background:#1a1a22}
 .up-next .l{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
 .up-next .t{font-size:14px;font-weight:600;margin:3px 0 8px}
 .up-next button{font:inherit;font-weight:650;font-size:13px;border:0;border-radius:9px;padding:8px 14px;cursor:pointer;background:#fff;color:#0b0b12}
-.epnav{position:absolute;left:16px;bottom:74px;z-index:5;display:flex;gap:8px}
+.epnav{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:5;display:flex;gap:8px}
 .epnav.hidden{display:none}
 .epnav button{display:flex;align-items:center;gap:6px;font:inherit;font-weight:600;font-size:13px;color:#fff;
   border:1px solid var(--stroke-2);border-radius:12px;padding:9px 13px;cursor:pointer;
