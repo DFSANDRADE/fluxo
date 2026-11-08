@@ -249,8 +249,10 @@ function proxyStream(req, res, upstreamUrl, opts) {
     out['Cache-Control'] = 'no-store';
     if (opts.filename) out['Content-Disposition'] = `attachment; filename="${opts.filename.replace(/"/g, '')}"`;
     res.writeHead(up.statusCode || 200, out);
+    const stop = () => { try { up.destroy(); } catch {} };
+    up.on('error', () => { try { res.end(); } catch {} });   // upstream caiu: fecha a resposta, não derruba o server
+    res.on('error', stop); res.on('close', stop); req.on('close', stop);   // cliente fechou: solta o upstream
     up.pipe(res);
-    req.on('close', () => up.destroy());
   });
 }
 
@@ -475,18 +477,44 @@ const minItem = (it, t) => ({
   rating: it.rating, ext: it.container_extension, cat: it.category_id, _n: norm(it.name)
 });
 
+// cache do catálogo em disco: sobrevive a reinício do serviço E a queda do provedor
+function idxCachePath(pvId) { return path.join(DLDIR, '_idx_' + String(pvId).replace(/[^\w.-]/g, '_') + '.json'); }
+function loadIdxCache(pvId) { try { const j = JSON.parse(fs.readFileSync(idxCachePath(pvId), 'utf8')); if (j && Array.isArray(j.vod)) return { live: j.live || [], vod: j.vod || [], series: j.series || [], at: j.at || 0 }; } catch {} return null; }
+function saveIdxCache(pvId, out) { try { fs.writeFileSync(idxCachePath(pvId), JSON.stringify({ live: out.live, vod: out.vod, series: out.series, at: out.at })); } catch {} }
+const nonEmpty = (s) => !!(s && ((s.vod && s.vod.length) || (s.series && s.series.length) || (s.live && s.live.length)));
+
 function buildIndex(pv) {
   pv = pv || getPv(DEFAULT_PV);
   if (BUILDING[pv.id]) return BUILDING[pv.id];
   BUILDING[pv.id] = (async () => {
-    const out = { live: [], vod: [], series: [], at: Date.now() };
+    // último catálogo bom: o da memória, senão o cache em disco
+    const prev = nonEmpty(SEARCHES[pv.id]) ? SEARCHES[pv.id] : loadIdxCache(pv.id);
+    const got = {};
     await Promise.all(['live', 'vod', 'series'].map((t) => new Promise((resolve) => {
       fetchBuffer(apiUrl(pv, { action: STREAM_ACTIONS[t] }), (e, b) => {
-        if (!e) { try { const a = JSON.parse(b.toString()); if (Array.isArray(a)) out[t] = a.map((x) => minItem(x, t)); } catch {} }
+        got[t] = null;
+        if (!e) { try { const a = JSON.parse(b.toString()); if (Array.isArray(a) && a.length) got[t] = a.map((x) => minItem(x, t)); } catch {} }
         resolve();
       });
     })));
-    SEARCHES[pv.id] = out; BUILDING[pv.id] = null;
+    const anyNew = got.live || got.vod || got.series;
+    if (!anyNew) {
+      // provedor fora do ar / resposta vazia -> NÃO zera o catálogo; mantém o último bom e re-tenta em ~5 min
+      BUILDING[pv.id] = null;
+      const keep = prev || sIndex(pv.id);
+      keep.at = Date.now() - INDEX_TTL + 5 * 60 * 1000;
+      SEARCHES[pv.id] = keep;
+      console.log(`Índice[${pv.id}] AVISO: provedor vazio/offline — mantendo ${keep.vod.length} filmes do cache, re-tento em ~5min.`);
+      return keep;
+    }
+    // por tipo: usa o novo quando veio, senão preserva o anterior daquele tipo (não zera por um soluço)
+    const out = {
+      live: got.live || (prev && prev.live) || [],
+      vod: got.vod || (prev && prev.vod) || [],
+      series: got.series || (prev && prev.series) || [],
+      at: Date.now(),
+    };
+    SEARCHES[pv.id] = out; BUILDING[pv.id] = null; saveIdxCache(pv.id, out);
     console.log(`Índice[${pv.id}] pronto: ${out.vod.length} filmes, ${out.series.length} séries, ${out.live.length} canais`);
     return out;
   })();
@@ -626,10 +654,21 @@ function ffmpegTranscode(req, res, src, cap1080, fmp4) {
   ff.stderr.resume();
   let ended = false; const endOne = () => { if (!ended) { ended = true; transcodeCount = Math.max(0, transcodeCount - 1); } };
   const kill = () => { try { ff.kill('SIGKILL'); } catch {} };
-  req.on('close', kill);
+  ff.stdout.on('error', () => {});                         // pipe pode quebrar se o cliente fecha: ignora
+  req.on('close', kill); res.on('close', kill); res.on('error', kill);
   ff.on('error', () => { endOne(); try { res.end(); } catch {} });
   ff.on('exit', () => { endOne(); try { res.end(); } catch {} });
 }
+
+// rede de segurança: um cliente desconectar no meio de um stream NÃO pode derrubar o servidor inteiro
+process.on('uncaughtException', (e) => {
+  const code = e && e.code;
+  if (code === 'ERR_STREAM_WRITE_AFTER_END' || code === 'ERR_STREAM_DESTROYED' || code === 'ECONNRESET' || code === 'EPIPE') {
+    console.error('Ignorado (cliente desconectou):', code); return;
+  }
+  console.error('uncaughtException FATAL:', e); process.exit(1);   // erro de verdade: deixa reiniciar limpo
+});
+process.on('unhandledRejection', (e) => { console.error('unhandledRejection:', (e && e.message) || e); });
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
@@ -951,6 +990,11 @@ server.listen(PORT, () => {
   console.log(`Fluxo rodando em http://0.0.0.0:${PORT}  (provedores: ${Object.keys(PROVIDERS).join(', ')} | padrão: ${def ? def.host : '—'})`);
   buildIndex(def); // aquece o índice de busca do provedor padrão em segundo plano
   buildEPG(def);   // aquece o guia (XMLTV) do provedor padrão em segundo plano
+  // auto-recupera: se o catálogo estiver vazio (provedor caiu), re-tenta sozinho a cada 5 min até voltar
+  setInterval(() => {
+    const d = getPv(DEFAULT_PV);
+    if (d && !nonEmpty(SEARCHES[d.id])) { buildIndex(d); if (!Object.keys(eIndex(d.id).byCh).length) buildEPG(d); }
+  }, 5 * 60 * 1000);
   if (JK) {
     setTimeout(() => fetchIndexerList(refreshTrackers), 3000); // aprende os ids e já checa a saúde (antes do 1º clique)
     setInterval(refreshTrackers, 4 * 60 * 1000);               // saúde periódica (consulta paralela, resiliente)
