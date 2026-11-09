@@ -613,6 +613,8 @@ function analyzeBottleneck(r) {
   let cause, verdict, actions;
   if (s.diskFreeGB != null && s.diskFreeGB < 1) {
     cause = 'disk'; verdict = 'Disco do servidor quase cheio — downloads/cache travam.'; actions = [A.reload];
+  } else if (s.providerOk === false) {
+    cause = 'provider_down'; verdict = `O provedor não está respondendo direito (HTTP ${s.providerStatus}). O problema é no PROVEDOR, não na sua rede — espere um pouco ou troque de provedor.`; actions = hasAlt ? [A.switchpv, A.reconnect] : [A.reconnect, A.reload];
   } else if (s.providerApiMs != null && s.providerApiMs > 6000) {
     cause = 'provider_api'; verdict = 'O provedor está demorando MUITO pra responder (pode estar instável/fora do ar).'; actions = hasAlt ? [A.switchpv, A.reconnect] : [A.reconnect, A.reload];
   } else if (s.providerSpeedMBs != null && s.providerSpeedMBs > 0 && s.providerSpeedMBs < 1.2) {
@@ -623,8 +625,8 @@ function analyzeBottleneck(r) {
     cause = 'downloads'; verdict = `${s.activeDownloads} downloads ao mesmo tempo estão saturando a banda.`; actions = [A.reconnect];
   } else if (s.loadPerCore > 3) {
     cause = 'server_load'; verdict = 'O servidor (ou o host Proxmox) está sobrecarregado — pode ser outra VM/backup rodando, não necessariamente o Fluxo. Reiniciar o Fluxo só ajuda se o peso for dele.'; actions = [A.reconnect, A.restart];
-  } else if ((s.providerSpeedMBs == null || s.providerSpeedMBs >= 2) && (c.stalls > 0 || c.bufferedAhead < 2 || c.videoErr)) {
-    cause = 'client'; verdict = 'O servidor puxa bem do provedor, então o gargalo é a SUA rede (wifi/Tailscale) ou o aparelho.'; actions = c.liveTC ? [A.reconnect, A.clean] : [A.reconnect, A.compat, A.clean];
+  } else if (s.providerOk === true && (s.providerSpeedMBs == null || s.providerSpeedMBs >= 2) && (c.stalls > 0 || c.bufferedAhead < 2 || c.videoErr)) {
+    cause = 'client'; verdict = 'O provedor respondeu e o servidor puxa bem dele, então o gargalo é a SUA rede (wifi/Tailscale) ou o aparelho.'; actions = c.liveTC ? [A.reconnect, A.clean] : [A.reconnect, A.compat, A.clean];
   } else {
     cause = 'unclear'; verdict = 'Não achei um gargalo claro. Vou religar a conexão — se persistir, tente recarregar.'; actions = [A.reconnect, A.reload];
   }
@@ -765,7 +767,15 @@ const server = http.createServer((req, res) => {
     S.transcodes = transcodeCount;
     S.logTail = LOGBUF.slice(-15);
     const t0 = Date.now();
-    await new Promise(r => fetchBuffer(apiUrl(pv, {}), () => { S.providerApiMs = Date.now() - t0; r(); }, 8000));
+    // saúde REAL do provedor: status HTTP + resposta válida (JSON). um 502 responde rápido mas NÃO está ok.
+    await new Promise(r => openUpstream(apiUrl(pv, {}), {}, (err, resp) => {
+      S.providerApiMs = Date.now() - t0;
+      if (err || !resp) { S.providerStatus = 'ERRO'; S.providerOk = false; return r(); }
+      S.providerStatus = resp.statusCode;
+      const chunks = []; resp.on('data', c => { if (chunks.length < 8) chunks.push(c); });
+      resp.on('end', () => { let j = null; try { j = JSON.parse(Buffer.concat(chunks).toString()); } catch {} S.providerOk = resp.statusCode === 200 && !!j; r(); });
+      resp.on('error', () => { S.providerOk = false; r(); });
+    }, 0, 8000));
     if (client.ctx && (client.ctx.type === 'movie' || client.ctx.type === 'series')) {
       const kind = client.ctx.type === 'movie' ? 'movie' : 'series';
       const url = `${pv.base}/${kind}/${pv.username}/${pv.password}/${client.ctx.id}.${client.ctx.ext || 'mp4'}`;

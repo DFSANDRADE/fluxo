@@ -639,7 +639,7 @@ function reconnectStream() {
   const d = dlOf(kind, saveCtx.id);
   const url = saveCtx._tc ? `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`   // se estava convertendo, reconecta no transcode
     : (d && d.status === 'done') ? `/dl/${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`;
-  showBuffer('Reconectando ao provedor…');
+  showBuffer('Travou — reconectando pra você, aguarde…');
   setTimeout(() => { destroyPlayers(); video.src = url; video.load(); video.onloadedmetadata = () => { if (t > 3) video.currentTime = t; }; video.play().catch(() => {}); }, 800);
 }
 
@@ -647,7 +647,7 @@ video.addEventListener('waiting', () => {
   showBuffer('Carregando buffer…'); stallCount++;
   clearTimeout(stallT);
   if (saveCtx && (saveCtx.type === 'movie' || saveCtx.type === 'series')) {   // travou e não anda? reconecta
-    stallT = setTimeout(() => { if (!video.paused && Date.now() - lastProg > 11000) reconnectStream(); }, 12000);
+    stallT = setTimeout(() => { if (!video.paused && Date.now() - lastProg > 5500) reconnectStream(); }, 6000);
   }
 });
 ['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
@@ -1208,6 +1208,7 @@ function renderDiag(d) {
   $('#diag-body').innerHTML = `<h1 class="set-h">🛠 Diagnóstico</h1>
     <div class="diag-verdict">${esc(d.verdict)}</div>
     <div class="diag-metrics">
+      ${m('Provedor — status', s.providerOk == null ? '—' : (s.providerOk ? '✅ no ar' : `🚫 FORA (HTTP ${s.providerStatus})`))}
       ${m('Provedor — velocidade', s.providerSpeedMBs != null ? s.providerSpeedMBs + ' MB/s' : '—')}
       ${m('Provedor — resposta', s.providerApiMs != null ? s.providerApiMs + ' ms' : '—')}
       ${m('Carga do servidor', s.loadPerCore != null ? s.loadPerCore + ' /núcleo' : '—')}
