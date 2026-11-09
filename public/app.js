@@ -651,10 +651,46 @@ video.addEventListener('waiting', () => {
   }
 });
 ['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
-video.addEventListener('pause', () => { if (video.readyState > 2) hideBuffer(); clearTimeout(stallT); });
-video.addEventListener('playing', () => { retryN = 0; });
+video.addEventListener('pause', () => { if (video.readyState > 2) hideBuffer(); clearTimeout(stallT); clearTimeout(noVidT); });
+video.addEventListener('playing', () => { retryN = 0; startNoVideoWatch(); });
 video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); });
 video.addEventListener('error', onVideoError);
+
+// URL de transcode (converte no servidor) pro que estiver tocando
+function transcodeSrc() {
+  if (!saveCtx) return null;
+  if (saveCtx.type === 'local') return `/transcode/local?f=${encodeURIComponent(saveCtx.id)}`;
+  if (saveCtx.type === 'movie' || saveCtx.type === 'series') {
+    const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
+    return `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext || 'mp4'}`;
+  }
+  return null;
+}
+function switchToTranscode(msg) {
+  const src = transcodeSrc(); if (!src || !saveCtx || saveCtx._tc) return;
+  saveCtx._tc = true;
+  showBuffer(msg || 'Convertendo o vídeo pra tocar aqui…');
+  const t = video.currentTime || 0;
+  destroyPlayers(); try { video.pause(); } catch {}
+  video.src = src; video.load();
+  video.onloadedmetadata = () => { if (t > 3) video.currentTime = t; };
+  video.play().catch(() => {});
+}
+// áudio tocando mas ZERO quadros de vídeo = codec de vídeo que o navegador não decodifica
+// (ex.: DivX/Xvid de torrent/DvdRip antigo). Não dispara 'error', então detectamos e convertemos.
+let noVidT = null;
+function startNoVideoWatch() {
+  clearTimeout(noVidT);
+  if (!saveCtx || saveCtx._tc || !['local', 'movie', 'series'].includes(saveCtx.type)) return;
+  noVidT = setTimeout(() => {
+    try {
+      if (!saveCtx || saveCtx._tc || video.paused || video.currentTime <= 1) return;
+      const qv = video.getVideoPlaybackQuality && video.getVideoPlaybackQuality();
+      const frames = qv ? qv.totalVideoFrames : (video.webkitDecodedFrameCount != null ? video.webkitDecodedFrameCount : 1);
+      if (frames === 0 || video.videoWidth === 0) switchToTranscode('Formato de vídeo antigo — convertendo pra tocar aqui…');
+    } catch {}
+  }, 3500);
+}
 
 // cache TEMPORÁRIO (não cai no meio): após 30s assistindo, baixa pro servidor marcado como auto.
 // o servidor apaga esses sozinho depois de 24h — só os que o usuário clicar pra baixar ficam permanentes.
@@ -674,7 +710,7 @@ function closePlayer() {
   $('#player').classList.add('hidden');
   try { video.pause(); } catch {}
   destroyPlayers();
-  clearTimeout(autoCacheT);
+  clearTimeout(autoCacheT); clearTimeout(noVidT);
   video.removeAttribute('src'); video.load(); saveCtx = null;
   hideBuffer();
 }
@@ -722,6 +758,9 @@ async function onVideoError() {
     destroyPlayers(); try { video.pause(); } catch {}
     video.src = `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`; video.load(); video.play().catch(() => {});
     return;
+  }
+  if ((code === 4 || code === 3) && saveCtx && saveCtx.type === 'local' && !saveCtx._tc) {
+    switchToTranscode('Formato de vídeo antigo — convertendo pra tocar aqui…'); return;   // arquivo local DivX/Xvid/HEVC
   }
   if (code === 4 || code === 3) {   // já tratou (ex.: até o transcode falhou)
     showError('🚫 Não consegui tocar este conteúdo, nem convertendo. Pode estar indisponível no provedor ou ser pesado demais — tente a versão normal (sem 4K) ou baixe.');

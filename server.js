@@ -641,10 +641,14 @@ function ffmpegTranscode(req, res, src, cap1080, fmp4) {
   const out = fmp4
     ? ['-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1']
     : ['-f', 'mpegts', '-muxdelay', '0', 'pipe:1'];
+  // flags de rede (user_agent/reconnect) só valem pra entrada HTTP; em arquivo local o ffmpeg ERRA com elas
+  const isHttp = /^https?:\/\//i.test(src);
+  const inFlags = isHttp
+    ? ['-user_agent', UA, '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2', '-rw_timeout', '15000000']
+    : [];
   const ff = spawn('ffmpeg', [
     '-hide_banner', '-loglevel', 'error',
-    '-user_agent', UA, '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
-    '-rw_timeout', '15000000', '-fflags', '+genpts', '-i', src,
+    ...inFlags, '-fflags', '+genpts', '-i', src,
     ...vf,
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
     '-g', '50', '-b:v', '3500k', '-maxrate', '3500k', '-bufsize', '7000k',
@@ -891,6 +895,11 @@ const server = http.createServer((req, res) => {
     const abs = path.resolve(q.get('f') || '');
     if (!insideRoots(abs)) { res.writeHead(403); return res.end(); }
     return serveLocal(req, res, abs);
+  }
+  if (p === '/transcode/local') {   // converte arquivo local (DivX/Xvid/HEVC de torrent ou baixado) -> H264 mp4
+    const abs = path.resolve(q.get('f') || '');
+    if (!insideRoots(abs)) { res.writeHead(403); return res.end(); }
+    return ffmpegTranscode(req, res, abs, false, true);
   }
   if (p === '/api/state') {
     const firstProfile = (CONFIG.profiles && CONFIG.profiles[0] && CONFIG.profiles[0].id) || 'eu';
