@@ -634,7 +634,7 @@ let stallT = null, lastProg = 0, stallCount = 0;
 function reconnectStream() {
   if (!saveCtx || (saveCtx.type !== 'movie' && saveCtx.type !== 'series')) return;
   if (retryN++ > 6) { hideBuffer(); toast('Não consegui reconectar — o provedor pode estar fora do ar'); return; }
-  const t = video.currentTime || saveCtx.resumePos || 0;
+  const t = Math.max(video.currentTime || 0, saveCtx.resumePos || 0);   // erro de rede zera currentTime → usa a última posição boa
   const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
   const d = dlOf(kind, saveCtx.id);
   const url = saveCtx._tc ? `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`   // se estava convertendo, reconecta no transcode
@@ -653,7 +653,7 @@ video.addEventListener('waiting', () => {
 ['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
 video.addEventListener('pause', () => { if (video.readyState > 2) hideBuffer(); clearTimeout(stallT); clearTimeout(noVidT); });
 video.addEventListener('playing', () => { retryN = 0; startNoVideoWatch(); });
-video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); });
+video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); if (saveCtx && video.currentTime > 1) saveCtx.resumePos = video.currentTime; });   // posição boa sempre fresca p/ reconexão
 video.addEventListener('error', onVideoError);
 
 // URL de transcode (converte no servidor) pro que estiver tocando

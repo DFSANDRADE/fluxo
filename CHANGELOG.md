@@ -2,6 +2,13 @@
 
 Todas as mudanças relevantes do Fluxo. Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.1] — 2026-11-17
+
+Correção pontual de reprodução.
+
+### Corrigido
+- **Voltar de onde parou após cair de rede:** quando um filme ou episódio caía por queda de rede (não só travamento), o player reconectava e **voltava para o começo, se comportando como se fosse ao vivo**. Causa: numa queda de rede o navegador zera a posição do vídeo, e a posição de retomada só era guardada no início da reprodução. Agora a posição é atualizada continuamente e o player sempre reconecta no ponto exato em que estava.
+
 ## [0.2.0] — 2026-11-09
 
 Release focada em **resiliência** (não cair, não sumir conteúdo) e em **tocar o que antes não tocava**.
