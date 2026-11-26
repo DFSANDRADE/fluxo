@@ -440,6 +440,21 @@ body.kid #setbtn{ display:none !important; }
 .card .thumb .dl-bar span{display:block;height:100%;background:var(--accent);transition:width .4s}
 .card .thumb .dl-ovs{font-size:11px;color:#fff;font-weight:600;margin-top:4px;text-shadow:0 1px 3px #000}
 .tempbadge{position:absolute;top:8px;left:8px;background:rgba(255,159,110,.92);color:#2a1500;font-size:9px;font-weight:800;letter-spacing:.5px;padding:3px 7px;border-radius:7px}
+/* lixeira por card nos Baixados */
+.card.poster .thumb{position:relative}
+.cardel{position:absolute;top:6px;right:6px;width:30px;height:30px;border:none;border-radius:9px;background:rgba(10,10,15,.72);color:#fff;font-size:14px;cursor:pointer;opacity:0;transition:opacity .15s,background .15s;display:flex;align-items:center;justify-content:center}
+.card.poster:hover .cardel,.cardel:focus{opacity:1}
+.cardel:hover{background:#ff5252}
+@media(hover:none){.cardel{opacity:.9}}
+/* barra de ferramentas da aba Baixados */
+.local-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:6px 2px 14px}
+.local-h{font-size:16px;font-weight:700}
+.local-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sortg{display:inline-flex;background:var(--panel);border:1px solid var(--stroke);border-radius:10px;overflow:hidden}
+.sortb{background:none;border:none;color:var(--muted);font-size:12px;font-weight:600;padding:7px 12px;cursor:pointer}
+.sortb.on{background:var(--accent);color:#fff}
+.local-sec{margin-bottom:18px}
+.local-grid{display:flex;flex-wrap:wrap;gap:16px}
 
 /* botão flutuante "travou ou tá ruim" + painel de diagnóstico */
 #fixbtn{position:fixed;right:18px;bottom:18px;z-index:70;width:46px;height:46px;border-radius:50%;

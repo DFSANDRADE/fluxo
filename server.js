@@ -336,7 +336,7 @@ function scanDir(dir, out, depth) {
   if (depth > 6) return;
   let entries; try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
-    if (e.name.startsWith('.') || e.name === 'lost+found') continue;
+    if (e.name.startsWith('.') || e.name.startsWith('_') || e.name === 'lost+found') continue;   // _prep e afins são internos
     const full = path.join(dir, e.name);
     if (e.isDirectory()) scanDir(full, out, (depth || 0) + 1);
     else if (VIDEO_EXT.has(path.extname(e.name).toLowerCase())) {
@@ -962,7 +962,30 @@ const server = http.createServer((req, res) => {
     return buildIndex(pv).then(run);
   }
   if (p === '/api/local') {
-    return sendJSON(res, 200, { items: listLocal().map(x => ({ name: x.name, file: x.file, size: x.size, ext: x.ext })) });
+    return sendJSON(res, 200, { items: listLocal().map(x => ({ name: x.name, file: x.file, size: x.size, ext: x.ext, mtime: x.mtime, folder: path.basename(path.dirname(x.file)) })) });
+  }
+  // apaga um arquivo local direto pela tela (serve pros que vieram via Samba, sem registro de download)
+  if (p === '/api/local/delete') {
+    const abs = path.resolve(q.get('f') || '');
+    if (!insideRoots(abs)) return sendJSON(res, 403, { error: 'fora' });
+    let ok = false; try { fs.unlinkSync(abs); ok = true; } catch {}
+    try { fs.unlinkSync(abs + '.part'); } catch {}
+    try { fs.unlinkSync(prepPath(abs)); } catch {}                 // versão preparada, se houver
+    let changed = false;
+    for (const k in DOWNLOADS) { if (DOWNLOADS[k].file === abs) { try { if (DOWNLOADS[k]._abort) DOWNLOADS[k]._abort(); } catch {} delete DOWNLOADS[k]; changed = true; } }
+    if (changed) saveDLIndex();
+    return sendJSON(res, 200, { ok });
+  }
+  // apaga TODOS os temporários de uma vez: caches "auto" (de assistir) + versões preparadas (regeneráveis)
+  if (p === '/api/local/cleartemp') {
+    let temp = 0;
+    for (const k in DOWNLOADS) {
+      const r = DOWNLOADS[k];
+      if (r.auto) { try { if (r._abort) r._abort(); } catch {} try { fs.unlinkSync(r.file); } catch {} try { fs.unlinkSync(r.file + '.part'); } catch {} delete DOWNLOADS[k]; temp++; }
+    }
+    if (temp) saveDLIndex();
+    let prep = 0; try { for (const f of fs.readdirSync(PREP_DIR)) { try { fs.unlinkSync(path.join(PREP_DIR, f)); prep++; } catch {} } } catch {}
+    return sendJSON(res, 200, { ok: true, temp, prep });
   }
   if (p === '/local') {
     const abs = path.resolve(q.get('f') || '');

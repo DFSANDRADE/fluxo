@@ -31,7 +31,7 @@
 - **❤️ Favoritos, histórico e "continuar assistindo"** que **sincronizam entre os aparelhos** (ficam no servidor, não só no navegador). Dá pra **remover um item** do histórico ou **limpar tudo** quando quiser.
 - **⏭️ Próximo episódio automático**, **retomar de onde parou** e **reconexão** se a internet oscilar.
 - **📶 Guia de programação (EPG)** com o que está passando agora e a seguir.
-- **🗂️ Aba "Baixados"** — tudo que você baixou (ou jogou na pasta via rede) toca offline aqui.
+- **🗂️ Aba "Baixados"** — tudo que você baixou (ou jogou na pasta via rede) toca offline aqui, em grade com **ordenação por recentes, nome ou pasta**, **lixeira em cada arquivo** (exclui direto pela tela, sem Samba) e botão de **limpar temporários**.
 - **🔊 Áudio que o navegador não toca, resolvido** — arquivos em MKV com áudio EAC3/AC3/DTS (comum em torrents) tocariam **mudos**; o Fluxo converte só o áudio pra AAC automaticamente (copiando o vídeo, sem recomprimir) e mantém a barra de tempo.
 
 ## 📸 Capturas

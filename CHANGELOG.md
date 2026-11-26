@@ -2,6 +2,18 @@
 
 Todas as mudanças relevantes do Fluxo. Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.5] — 2026-11-26
+
+Organizar e limpar os Baixados sem precisar de rede/Samba.
+
+### Adicionado
+- **Organizar os Baixados:** a aba agora é uma **grade** (não mais uma fileira rolável) com ordenação por **Recentes**, **A-Z** ou **Pasta** (agrupa por pasta, ótimo pra achar episódios de uma série/torrent). A ordem escolhida fica salva.
+- **Excluir arquivo direto pela tela:** cada item dos Baixados ganhou uma **🗑 lixeira** (aparece ao passar o mouse / sempre visível no toque). Apaga o arquivo do servidor na hora — não precisa mais entrar no Samba pra deletar. Pede confirmação, porque é definitivo.
+- **Limpar temporários:** botão **🧹** que apaga de uma vez os caches de "assistir" (os TEMP de 24h) e as versões preparadas de áudio (que são refeitas quando precisar). O que você baixou de propósito **não é tocado**.
+
+### Corrigido
+- As versões preparadas de áudio (pasta interna `_prep`) não aparecem mais misturadas na lista de Baixados.
+
 ## [0.2.4] — 2026-11-26
 
 Som nos arquivos de torrent que vinham mudos.

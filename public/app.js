@@ -206,25 +206,81 @@ function dlCard(d) {   // card de download em progresso (ou com erro)
 function localCard(it, temp) {
   const card = document.createElement('div'); card.className = 'card poster';
   const gb = it.size >= 1073741824 ? (it.size / 1073741824).toFixed(2) + ' GB' : (it.size / 1048576).toFixed(0) + ' MB';
-  card.innerHTML = `<div class="thumb noimg"><div class="ph">${esc(initials(it.name))}</div>${temp ? '<span class="tempbadge">TEMP 24h</span>' : ''}</div>
+  card.innerHTML = `<div class="thumb noimg"><div class="ph">${esc(initials(it.name))}</div>${temp ? '<span class="tempbadge">TEMP 24h</span>' : ''}
+    <button class="cardel" title="Excluir este arquivo" aria-label="Excluir">🗑</button></div>
     <div class="meta"><div class="title">${esc(it.name)}</div><div class="now">${gb} · ${esc(it.ext)}</div></div>`;
   card.onclick = () => playLocal(it);
+  card.querySelector('.cardel').onclick = (e) => { e.stopPropagation(); deleteLocal(it); };
   return card;
 }
+async function deleteLocal(it) {
+  if (!confirm(`Excluir "${it.name}" do servidor?\nIsso apaga o arquivo de vez — não dá pra desfazer.`)) return;
+  try {
+    await api(`/api/local/delete?f=${encodeURIComponent(it.file)}`);
+    delete CONT['local:' + it.file];
+    WATCHED = WATCHED.filter(w => w.id !== it.file); store.set('watched', WATCHED); store.set('cont', CONT); pushState();
+    toast('Arquivo excluído');
+    renderLocal($('#rows'));
+  } catch { toast('Não deu pra excluir'); }
+}
+let localSort = store.get('localSort', 'recent');   // recent | name | folder
 async function renderLocal(rows) {
   let data = { items: [] };
   try { data = await api('/api/local'); } catch {}
   rows.innerHTML = '';
   const active = Object.values(DL).filter(d => d.status === 'downloading' || d.status === 'error');
   if (active.length) rows.appendChild(staticRow('⬇ Baixando agora', active.map(dlCard)));   // progresso aparece aqui também
-  if (data.items && data.items.length) {
-    const tempFiles = {}; Object.values(DL).forEach(d => { if (d.auto && d.file) tempFiles[d.file] = 1; });
-    rows.appendChild(staticRow(`Baixados · ${data.items.length}`, data.items.map(it => localCard(it, tempFiles[it.file]))));
-  } else if (!active.length) {
-    rows.innerHTML = `<div class="empty">Nada baixado ainda.<br><small>Baixe filmes/séries (IPTV ou torrents) ou jogue vídeos na pasta — tudo aparece aqui e funciona offline.</small></div>` + LOCAL_NOTE;
+  const items = (data.items || []).slice();
+  const tempFiles = {}; Object.values(DL).forEach(d => { if (d.auto && d.file) tempFiles[d.file] = 1; });
+  const nTemp = items.filter(it => tempFiles[it.file]).length;
+  if (!items.length) {
+    if (!active.length) rows.innerHTML = `<div class="empty">Nada baixado ainda.<br><small>Baixe filmes/séries (IPTV ou torrents) ou jogue vídeos na pasta — tudo aparece aqui e funciona offline.</small></div>` + LOCAL_NOTE;
+    else rows.insertAdjacentHTML('beforeend', LOCAL_NOTE);
     return;
   }
+  // barra de ferramentas: contagem + ordenação + limpar temporários
+  const head = document.createElement('div'); head.className = 'local-head';
+  const btn = (k, txt) => `<button class="sortb${localSort === k ? ' on' : ''}" data-sort="${k}">${txt}</button>`;
+  head.innerHTML = `<div class="local-h">Baixados · ${items.length}</div>
+    <div class="local-tools">
+      <div class="sortg">${btn('recent', 'Recentes')}${btn('name', 'A-Z')}${btn('folder', 'Pasta')}</div>
+      ${nTemp ? `<button class="btn ghost sm" id="clrtmp" title="Apagar os temporários (cache de assistir + versões preparadas)">🧹 Limpar temporários (${nTemp})</button>` : ''}
+    </div>`;
+  head.querySelectorAll('[data-sort]').forEach(b => b.onclick = () => { localSort = b.dataset.sort; store.set('localSort', localSort); renderLocal(rows); });
+  const ct = head.querySelector('#clrtmp'); if (ct) ct.onclick = clearTempFiles;
+  rows.appendChild(head);
+
+  const card = it => localCard(it, tempFiles[it.file]);
+  if (localSort === 'folder') {
+    const groups = {};
+    items.forEach(it => { (groups[it.folder || '—'] = groups[it.folder || '—'] || []).push(it); });
+    Object.keys(groups).sort((a, b) => a.localeCompare(b, 'pt')).forEach(f => {
+      groups[f].sort((a, b) => a.name.localeCompare(b.name, 'pt'));
+      rows.appendChild(gridSection('📁 ' + f + ' · ' + groups[f].length, groups[f].map(card)));
+    });
+  } else {
+    if (localSort === 'name') items.sort((a, b) => a.name.localeCompare(b.name, 'pt'));
+    else items.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+    rows.appendChild(gridSection(null, items.map(card)));
+  }
   rows.insertAdjacentHTML('beforeend', LOCAL_NOTE);
+}
+// seção em GRADE (quebra linha) — melhor que a fileira rolável pra achar arquivo entre muitos
+function gridSection(title, cards) {
+  const sec = document.createElement('section'); sec.className = 'row vod local-sec';
+  if (title) sec.innerHTML = `<div class="row-head"><h3>${esc(title)}</h3></div>`;
+  const grid = document.createElement('div'); grid.className = 'local-grid';
+  cards.forEach(c => c && grid.appendChild(c)); sec.appendChild(grid);
+  return sec;
+}
+async function clearTempFiles() {
+  if (!confirm('Apagar os arquivos temporários?\n\nIsso remove os caches de "assistir" (que já se apagam sozinhos em 24h) e as versões preparadas de áudio (que são refeitas quando precisar). O que você baixou de propósito NÃO é tocado.')) return;
+  try {
+    const r = await api('/api/local/cleartemp');
+    await refreshDL();
+    toast(`Temporários limpos (${(r.temp || 0) + (r.prep || 0)} arquivo(s))`);
+    renderLocal($('#rows'));
+  } catch { toast('Não deu pra limpar'); }
 }
 async function playLocal(it) {
   clearTimeout(autoCacheT);
