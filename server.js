@@ -944,9 +944,15 @@ const server = http.createServer((req, res) => {
     return addToTm(magnet);
   }
   if (p === '/api/torrent/list') {
-    return transmissionRPC('torrent-get', { fields: ['id', 'name', 'percentDone', 'status', 'rateDownload', 'eta', 'totalSize'] }, (e, r) => {
+    return transmissionRPC('torrent-get', { fields: ['id', 'name', 'percentDone', 'status', 'rateDownload', 'rateUpload', 'eta', 'totalSize', 'peersConnected', 'peersSendingToUs', 'metadataPercentComplete', 'errorString'] }, (e, r) => {
       sendJSON(res, 200, { torrents: (!e && r && r.arguments && r.arguments.torrents) || [] });
     });
+  }
+  if (p === '/api/torrent/pause') {
+    return transmissionRPC('torrent-stop', { ids: [parseInt(q.get('id') || '0', 10)] }, () => sendJSON(res, 200, { ok: true }));
+  }
+  if (p === '/api/torrent/resume') {
+    return transmissionRPC('torrent-start-now', { ids: [parseInt(q.get('id') || '0', 10)] }, () => sendJSON(res, 200, { ok: true }));
   }
   if (p === '/api/torrent/delete') {
     return transmissionRPC('torrent-remove', { ids: [parseInt(q.get('id') || '0', 10)], 'delete-local-data': q.get('trash') === '1' }, () => sendJSON(res, 200, { ok: true }));

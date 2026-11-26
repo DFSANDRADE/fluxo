@@ -27,7 +27,7 @@
 - **▶️ Toca liso até em TV/PC fraco** — ao vivo via **HLS nativo** (decodifica em hardware no Safari/Mac antigo) e, pros canais `[H265]`, **transcode H265→H264 sob demanda** via ffmpeg.
 - **⚡ Modo leve** — um clique desliga blur/animações pra rodar redondo em hardware limpo.
 - **⬇️ Baixar pra ver depois** — no **servidor** (fica guardado, toca offline) ou **no aparelho**. Filmes grandes caem em ~1 min.
-- **🧲 Torrents integrados** (opcional) — busca via [Jackett](https://github.com/Jackett/Jackett) e baixa pelo transmission, direto da interface.
+- **🧲 Torrents integrados** (opcional) — busca via [Jackett](https://github.com/Jackett/Jackett) e baixa pelo transmission, direto da interface, com **pausar/retomar** e status claro de cada download (procurando peers, pausado, baixando…).
 - **❤️ Favoritos, histórico e "continuar assistindo"** que **sincronizam entre os aparelhos** (ficam no servidor, não só no navegador). Dá pra **remover um item** do histórico ou **limpar tudo** quando quiser.
 - **⏭️ Próximo episódio automático**, **retomar de onde parou** e **reconexão** se a internet oscilar.
 - **📶 Guia de programação (EPG)** com o que está passando agora e a seguir.

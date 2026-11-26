@@ -268,6 +268,18 @@ body.lite .spin{animation-duration:1.2s}
 .dl-bar span{display:block;height:100%;border-radius:99px;background:var(--accent);transition:width .4s}
 .dl-s{font-size:12px;color:var(--muted)}
 .dl-actions{display:flex;gap:6px;flex:0 0 auto}
+/* ações por linha de download (retomar/pausar + cancelar) */
+.dl-acts{display:flex;gap:6px;flex:0 0 auto}
+.dl-acts .btn.sm{min-width:36px;padding:0 10px}
+/* cores dos status honestos do torrent */
+.dl-s .st-ok{color:#4ade80;font-weight:600}
+.dl-s .st-dl{color:var(--accent);font-weight:600}
+.dl-s .st-pause{color:#ffb454;font-weight:600}
+.dl-s .st-wait{color:#8ab4ff;font-weight:600}
+.dl-s .st-err{color:#ff6b6b;font-weight:600}
+/* barra "respirando" enquanto procura peers / lê o magnet */
+.dl-bar.pulse{animation:dlpulse 1.3s ease-in-out infinite}
+@keyframes dlpulse{0%,100%{opacity:1}50%{opacity:.45}}
 
 /* placeholder quando a imagem do provedor está quebrada/vazia */
 .thumb.noimg{display:grid;place-items:center;background:linear-gradient(135deg,#1b1b25,#121219)}

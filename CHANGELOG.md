@@ -2,6 +2,17 @@
 
 Todas as mudanças relevantes do Fluxo. Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.3] — 2026-11-26
+
+Controle e clareza nos downloads de torrent.
+
+### Adicionado
+- **Pausar / Retomar torrent:** cada download ganhou um botão **⏸ / ▶**. Um torrent que entrou **pausado** (ou que você pausou) agora religa com um clique, sem precisar mexer no transmission na mão.
+- **Confirmação ao cancelar:** cancelar um download em andamento agora pede confirmação (apaga o que já baixou), pra não perder progresso por engano.
+
+### Corrigido
+- **Status honesto do download:** o `0% · parado · 0.0 MB/s` enganava — parecia travado quando era só o torrent **pausado** ou ainda **procurando peers**. Agora cada estado tem nome e cor próprios: **⏸ pausado**, **🔍 procurando peers…**, **🧲 lendo o magnet…**, **🔎 checando arquivos…**, **⬇ baixando** e **concluído ✓**. Enquanto procura peers/lê o magnet, a barra "respira" pra deixar claro que está trabalhando, não parado. A velocidade só aparece quando realmente há download.
+
 ## [0.2.2] — 2026-11-25
 
 Gerenciar o histórico e reproduzir melhor o conteúdo convertido.

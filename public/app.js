@@ -240,7 +240,6 @@ function playLocal(it) {
 }
 
 /* ---------- Torrents (Jackett busca + transmission baixa pra Mídia Local) ---------- */
-const TORR_ST = { 0: 'parado', 1: 'fila', 2: 'checando', 3: 'fila', 4: 'baixando', 5: 'fila', 6: 'concluído' };
 let torrPoll = null;
 function torrentRow(r) {
   const gb = r.size >= 1073741824 ? (r.size / 1073741824).toFixed(2) + ' GB' : (r.size / 1048576).toFixed(0) + ' MB';
@@ -255,7 +254,7 @@ function renderTorrents(rows) {
   rows.innerHTML = `
     <div id="torr-trackers" class="torr-trackers"></div>
     <div id="torr-active"></div>
-    <div id="torr-results"><div class="empty">Use a busca lá em cima (com a tag <b>Torrents</b> marcada) pra procurar e baixar. O que estiver baixando aparece aqui com barra e botão de cancelar, e na aba <b>Baixados</b> quando terminar.</div></div>`;
+    <div id="torr-results"><div class="empty">Use a busca lá em cima (com a tag <b>Torrents</b> marcada) pra procurar e baixar. O que estiver baixando aparece aqui com barra, status e botões de pausar/retomar, e na aba <b>Baixados</b> quando terminar.</div></div>`;
   loadTrackerStatus();
   refreshTorrents(); startTorrentPoll();
 }
@@ -290,14 +289,35 @@ async function refreshTorrents() {
     const p = Math.round((t.percentDone || 0) * 100);
     const done = p >= 100;
     const eta = (t.eta > 0 && !done) ? ' · faltam ' + (t.eta > 3600 ? Math.round(t.eta / 3600) + 'h' : Math.round(t.eta / 60) + 'min') : '';
+    const st = torrState(t);
+    const spd = t.rateDownload > 0 ? ' · ' + (t.rateDownload / 1048576).toFixed(1) + ' MB/s' : '';
+    const paused = t.status === 0;
     const row = document.createElement('div'); row.className = 'dl-row';
     row.innerHTML = `<div class="dl-i"><div class="dl-t">${esc(t.name)}</div>
-      <div class="dl-bar"><span style="width:${p}%"></span></div>
-      <div class="dl-s">${p}% · ${done ? 'concluído ✓' : TORR_ST[t.status] || ''} · ${((t.rateDownload || 0) / 1048576).toFixed(1)} MB/s${eta}</div></div>
-      <button class="btn ghost sm" data-del>${done ? 'Remover' : '✕ Cancelar'}</button>`;
-    row.querySelector('[data-del]').onclick = () => { api(`/api/torrent/delete?id=${t.id}&trash=${done ? 0 : 1}`).then(() => refreshTorrents()); };
+      <div class="dl-bar${st.pulse ? ' pulse' : ''}"><span style="width:${p}%"></span></div>
+      <div class="dl-s"><span class="${st.cls}">${st.txt}</span> · ${p}%${done ? '' : spd}${eta}</div></div>
+      <div class="dl-acts">${done ? '' : `<button class="btn ghost sm" data-tog title="${paused ? 'Retomar' : 'Pausar'}">${paused ? '▶' : '⏸'}</button>`}
+      <button class="btn ghost sm" data-del>${done ? 'Remover' : '✕'}</button></div>`;
+    const tog = row.querySelector('[data-tog]');
+    if (tog) tog.onclick = () => { api(`/api/torrent/${paused ? 'resume' : 'pause'}?id=${t.id}`).then(() => refreshTorrents()); };
+    row.querySelector('[data-del]').onclick = () => {
+      if (!done && !confirm('Cancelar e apagar este download?')) return;
+      api(`/api/torrent/delete?id=${t.id}&trash=${done ? 0 : 1}`).then(() => refreshTorrents());
+    };
     box.appendChild(row);
   });
+}
+// Status honesto do torrent: diferencia pausado, procurando peers, checando, erro, etc.
+function torrState(t) {
+  if (t.errorString) return { txt: '⚠ ' + t.errorString, cls: 'st-err' };
+  if ((t.percentDone || 0) >= 1) return { txt: 'concluído ✓', cls: 'st-ok' };
+  if (t.status === 0) return { txt: '⏸ pausado', cls: 'st-pause' };
+  if (t.status === 2) return { txt: '🔎 checando arquivos…', cls: 'st-wait', pulse: true };
+  if ((t.metadataPercentComplete || 1) < 1) return { txt: '🧲 lendo o magnet…', cls: 'st-wait', pulse: true };
+  if (t.rateDownload > 0) return { txt: '⬇ baixando', cls: 'st-dl' };
+  if ((t.peersConnected || 0) > 0) return { txt: 'conectado, aguardando dados…', cls: 'st-wait', pulse: true };
+  if (t.status === 1 || t.status === 3 || t.status === 5) return { txt: '🔍 procurando peers…', cls: 'st-wait', pulse: true };
+  return { txt: '🔍 procurando peers…', cls: 'st-wait', pulse: true };
 }
 function startTorrentPoll() {
   if (torrPoll) return;
