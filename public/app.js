@@ -629,18 +629,22 @@ function startBufMon() {
   }, 350);
 }
 
+// posição REAL do conteúdo: no transcode o pipe começa num offset (_tcOff) e o currentTime é relativo a ele
+function effPos() { return saveCtx && saveCtx._tc ? (saveCtx._tcOff || 0) + (video.currentTime || 0) : (video.currentTime || 0); }
+
 // reconecta filme/episódio no ponto atual (usado em erro E em travamento prolongado)
 let stallT = null, lastProg = 0, stallCount = 0;
 function reconnectStream() {
   if (!saveCtx || (saveCtx.type !== 'movie' && saveCtx.type !== 'series')) return;
   if (retryN++ > 6) { hideBuffer(); toast('Não consegui reconectar — o provedor pode estar fora do ar'); return; }
-  const t = Math.max(video.currentTime || 0, saveCtx.resumePos || 0);   // erro de rede zera currentTime → usa a última posição boa
+  const t = Math.max(effPos(), saveCtx.resumePos || 0);   // erro de rede zera currentTime → usa a última posição boa
   const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
-  const d = dlOf(kind, saveCtx.id);
-  const url = saveCtx._tc ? `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`   // se estava convertendo, reconecta no transcode
-    : (d && d.status === 'done') ? `/dl/${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`;
+  let url;
+  if (saveCtx._tc) { saveCtx._tcOff = t; url = transcodeSrc(t); }   // convertendo: reabre o transcode JÁ no ponto (senão recomeça do zero)
+  else { const d = dlOf(kind, saveCtx.id); url = (d && d.status === 'done') ? `/dl/${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`; }
   showBuffer('Travou — reconectando pra você, aguarde…');
-  setTimeout(() => { destroyPlayers(); video.src = url; video.load(); video.onloadedmetadata = () => { if (t > 3) video.currentTime = t; }; video.play().catch(() => {}); }, 800);
+  const seekBack = !saveCtx._tc && t > 3;   // no transcode o pipe já começa no ponto; seek só no stream normal
+  setTimeout(() => { destroyPlayers(); video.src = url; video.load(); if (seekBack) video.onloadedmetadata = () => { try { video.currentTime = t; } catch {} }; video.play().catch(() => {}); }, 800);
 }
 
 video.addEventListener('waiting', () => {
@@ -653,28 +657,28 @@ video.addEventListener('waiting', () => {
 ['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
 video.addEventListener('pause', () => { if (video.readyState > 2) hideBuffer(); clearTimeout(stallT); clearTimeout(noVidT); });
 video.addEventListener('playing', () => { retryN = 0; startNoVideoWatch(); });
-video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); if (saveCtx && video.currentTime > 1) saveCtx.resumePos = video.currentTime; });   // posição boa sempre fresca p/ reconexão
+video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); if (saveCtx && video.currentTime > 1) saveCtx.resumePos = effPos(); });   // posição boa sempre fresca p/ reconexão
 video.addEventListener('error', onVideoError);
 
-// URL de transcode (converte no servidor) pro que estiver tocando
-function transcodeSrc() {
+// URL de transcode (converte no servidor) pro que estiver tocando; off = segundo pra retomar (o pipe começa lá)
+function transcodeSrc(off) {
   if (!saveCtx) return null;
-  if (saveCtx.type === 'local') return `/transcode/local?f=${encodeURIComponent(saveCtx.id)}`;
-  if (saveCtx.type === 'movie' || saveCtx.type === 'series') {
-    const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
-    return `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext || 'mp4'}`;
-  }
-  return null;
+  let url;
+  if (saveCtx.type === 'local') url = `/transcode/local?f=${encodeURIComponent(saveCtx.id)}`;
+  else if (saveCtx.type === 'movie' || saveCtx.type === 'series') url = `/transcode/${saveCtx.type === 'movie' ? 'movie' : 'series'}/${saveCtx.id}.${saveCtx.ext || 'mp4'}`;
+  else return null;
+  if (off && off > 1) url += (url.includes('?') ? '&' : '?') + 't=' + Math.floor(off);
+  return url;
 }
 function switchToTranscode(msg) {
-  const src = transcodeSrc(); if (!src || !saveCtx || saveCtx._tc) return;
-  saveCtx._tc = true;
+  if (!saveCtx || saveCtx._tc) return;
+  const t = video.currentTime || saveCtx.resumePos || 0;   // ponto atual: o transcode retoma daqui (não do zero)
+  const src = transcodeSrc(t); if (!src) return;
+  saveCtx._tc = true; saveCtx._tcOff = t;
   showBuffer(msg || 'Convertendo o vídeo pra tocar aqui…');
-  const t = video.currentTime || 0;
   destroyPlayers(); try { video.pause(); } catch {}
   video.src = src; video.load();
-  video.onloadedmetadata = () => { if (t > 3) video.currentTime = t; };
-  video.play().catch(() => {});
+  video.play().catch(() => {});   // pipe já começa no ponto certo; sem seek
 }
 // áudio tocando mas ZERO quadros de vídeo = codec de vídeo que o navegador não decodifica
 // (ex.: DivX/Xvid de torrent/DvdRip antigo). Não dispara 'error', então detectamos e convertemos.
@@ -724,11 +728,21 @@ function bumpHit(item, type) {
   store.set('hits', HITS); pushState();
 }
 function saveProgress() {
-  if (!saveCtx || !video.duration) return;
-  const now = Date.now(); if (now - saveT < 4000) return; saveT = now;
-  const pct = video.currentTime / video.duration;
+  if (!saveCtx) return;
+  const now = Date.now(); if (now - saveT < 4000) return;
   const key = saveCtx.type + ':' + (saveCtx.id || saveCtx.sid);
-  if (pct > 0.02 && pct < 0.95) CONT[key] = Object.assign({}, saveCtx, { pos: video.currentTime, dur: video.duration, at: now });
+  // registro limpo: NÃO guarda flags internas (_tc/_tcOff/_handled/resumePos) no "continuar assistindo"
+  const base = { type: saveCtx.type, id: saveCtx.id, sid: saveCtx.sid, ext: saveCtx.ext, name: saveCtx.name, icon: saveCtx.icon };
+  const fin = isFinite(video.duration) && video.duration > 0;
+  if (saveCtx._tc && !fin) {   // transcode ao vivo: sem duração confiável → guarda pela posição efetiva
+    const pos = effPos(); if (pos < 20) return; saveT = now;
+    CONT[key] = Object.assign(base, { pos, dur: 0, at: now });
+    store.set('cont', CONT); pushState(); return;
+  }
+  if (!fin) return;
+  saveT = now;
+  const pct = video.currentTime / video.duration;
+  if (pct > 0.02 && pct < 0.95) CONT[key] = Object.assign(base, { pos: video.currentTime, dur: video.duration, at: now });
   else delete CONT[key];
   store.set('cont', CONT); pushState();
 }
@@ -752,11 +766,12 @@ async function onVideoError() {
     let ok = false;
     try { const r = await fetch(`/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`, { headers: { Range: 'bytes=0-1' }, cache: 'no-store' }); ok = r.status >= 200 && r.status < 400; } catch {}
     if (!ok) { showError('🚫 Este conteúdo não está disponível no provedor (o link foi removido). Tente outra versão — as "4K" costumam sumir — ou outro título.'); return; }
-    // existe, mas o navegador não decodificou (HEVC/4K) → converte no servidor
-    saveCtx._tc = true;
+    // existe, mas o navegador não decodificou (HEVC/4K) → converte no servidor, retomando do ponto
+    const t = video.currentTime || saveCtx.resumePos || 0;
+    saveCtx._tc = true; saveCtx._tcOff = t;
     showBuffer('Formato pesado — convertendo no servidor pra tocar aqui…');
     destroyPlayers(); try { video.pause(); } catch {}
-    video.src = `/transcode/${kind}/${saveCtx.id}.${saveCtx.ext}`; video.load(); video.play().catch(() => {});
+    video.src = transcodeSrc(t); video.load(); video.play().catch(() => {});
     return;
   }
   if ((code === 4 || code === 3) && saveCtx && saveCtx.type === 'local' && !saveCtx._tc) {
@@ -910,18 +925,51 @@ function renderDownloads() {
     });
   }
   if (!list.length && !active.length) { box.innerHTML = '<div class="empty">Nada por aqui ainda.<br><small>O que você assistir ou baixar aparece aqui.</small></div>'; return; }
-  if (list.length) box.insertAdjacentHTML('beforeend', '<h3 class="hist-h">Histórico</h3>');
+  if (list.length) {
+    box.insertAdjacentHTML('beforeend', '<div class="hist-head"><h3 class="hist-h">Histórico</h3><button class="icbtn del" id="hist-clear" title="Limpar o histórico de assistidos">🧹 Limpar</button></div>');
+    $('#hist-clear').onclick = clearWatchHistory;
+  }
   list.forEach(h => {
     const row = document.createElement('div'); row.className = 'dl-row';
     const badges = `${h.downloaded ? '<span class="hb dl">⬇ baixado</span>' : ''}${h.watched ? '<span class="hb w">▶ assistido</span>' : ''}`;
     row.innerHTML = `<img class="dl-thumb" src="${img(h.icon)}" alt="">
       <div class="dl-i"><div class="dl-t">${esc(h.name)}</div><div class="dl-s">${badges} · ${timeago(h.at)}</div></div>
-      <div class="dl-actions"><button class="icbtn" data-play>▶</button>${h.downloaded ? '<button class="icbtn" data-del>🗑</button>' : ''}</div>`;
+      <div class="dl-actions"><button class="icbtn" data-play title="Assistir">▶</button><button class="icbtn del" data-del title="Remover do histórico">🗑</button></div>`;
     row.querySelector('[data-play]').onclick = () => { closeDownloads(); playFromHistory(h); };
-    const del = row.querySelector('[data-del]');
-    if (del) del.onclick = () => api(`/api/download/delete?key=${encodeURIComponent(h.dlkey)}`).then(() => { delete DL[h.dlkey]; refreshDL().then(renderDownloads); });
+    row.querySelector('[data-del]').onclick = () => removeFromHistory(h);
     box.appendChild(row);
   });
+}
+// remove um item do histórico. Só "assistido" some na hora (registro local).
+// Item BAIXADO confirma antes, porque remover de vez apaga o arquivo (não dá pra desfazer).
+function removeFromHistory(h) {
+  const dropRecord = () => {
+    WATCHED = WATCHED.filter(w => w.key !== h.key);
+    delete CONT[h.key];
+    store.set('watched', WATCHED); store.set('cont', CONT); pushState();
+  };
+  if (h.downloaded && h.dlkey) {
+    const d = DL[h.dlkey]; const mb = d && d.total ? ` (${(d.total / 1048576).toFixed(0)} MB)` : '';
+    if (!confirm(`"${h.name}" está baixado${mb}.\nRemover do histórico vai APAGAR o arquivo baixado — isso não dá pra desfazer.\n\nContinuar?`)) return;
+    api(`/api/download/delete?key=${encodeURIComponent(h.dlkey)}`)
+      .then(() => { delete DL[h.dlkey]; dropRecord(); toast('Removido do histórico e arquivo apagado'); return refreshDL(); })
+      .then(renderDownloads);
+    return;
+  }
+  dropRecord();
+  toast('Removido do histórico');
+  renderDownloads();
+}
+// limpa o histórico de assistidos + "continuar assistindo" de uma vez.
+// NÃO apaga arquivos baixados (esses continuam listados; pra apagar, use o 🗑 do item).
+function clearWatchHistory() {
+  const n = WATCHED.length;
+  if (!n) { toast('Nada pra limpar no histórico'); return; }
+  if (!confirm(`Limpar o histórico de assistidos (${n} ${n === 1 ? 'item' : 'itens'}) e o "continuar assistindo"?\n\nOs arquivos BAIXADOS continuam — pra apagar um baixado, use o 🗑 dele.`)) return;
+  WATCHED = []; CONT = {};
+  store.set('watched', WATCHED); store.set('cont', CONT); pushState();
+  toast('Histórico limpo');
+  renderDownloads();
 }
 function playFromHistory(h) {
   if (h.type === 'movie') { const d = dlOf('movie', h.id); playVOD(h.id, (d && d.ext) || 'mp4', h.name, h.icon); }

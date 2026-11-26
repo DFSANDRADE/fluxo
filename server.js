@@ -626,16 +626,16 @@ function analyzeBottleneck(r) {
   } else if (s.loadPerCore > 3) {
     cause = 'server_load'; verdict = 'O servidor (ou o host Proxmox) está sobrecarregado — pode ser outra VM/backup rodando, não necessariamente o Fluxo. Reiniciar o Fluxo só ajuda se o peso for dele.'; actions = [A.reconnect, A.restart];
   } else if (s.providerOk === true && (s.providerSpeedMBs == null || s.providerSpeedMBs >= 2) && (c.stalls > 0 || c.bufferedAhead < 2 || c.videoErr)) {
-    cause = 'client'; verdict = 'O provedor respondeu e o servidor puxa bem dele, então o gargalo é a SUA rede (wifi/Tailscale) ou o aparelho.'; actions = c.liveTC ? [A.reconnect, A.clean] : [A.reconnect, A.compat, A.clean];
+    cause = 'client'; verdict = 'O provedor respondeu e o servidor puxou bem dele — então o engasgo foi no caminho até este aparelho (wifi/Tailscale) ou no próprio aparelho. Costuma ser momentâneo; vou religar o vídeo.'; actions = c.liveTC ? [A.reconnect, A.clean] : [A.reconnect, A.compat, A.clean];
   } else {
-    cause = 'unclear'; verdict = 'Não achei um gargalo claro. Vou religar a conexão — se persistir, tente recarregar.'; actions = [A.reconnect, A.reload];
+    cause = 'ok'; verdict = 'Tá tudo no ar e respondendo normal agora (provedor ok, servidor de boa). Se travou, foi um engasgo rápido que já passou — vou religar o vídeo só por garantia.'; actions = [A.reconnect, A.reload];
   }
   return { cause, verdict, actions, server: s };
 }
 
 // transcode HEVC/H265 -> H264 em tempo real. fmp4=true -> MP4 fragmentado (toca direto no <video>, pro VOD);
 // senão mpegts (pro ao vivo via mpegts.js). cap1080=true limita 4K a 1080p (alivia a CPU).
-function ffmpegTranscode(req, res, src, cap1080, fmp4) {
+function ffmpegTranscode(req, res, src, cap1080, fmp4, startAt) {
   res.writeHead(200, { 'Content-Type': fmp4 ? 'video/mp4' : 'video/mp2t', 'Cache-Control': 'no-store' });
   const vf = cap1080 ? ['-vf', "scale='min(1920,iw)':-2"] : [];
   const out = fmp4
@@ -646,12 +646,17 @@ function ffmpegTranscode(req, res, src, cap1080, fmp4) {
   const inFlags = isHttp
     ? ['-user_agent', UA, '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2', '-rw_timeout', '15000000']
     : [];
+  const seek = (startAt && startAt > 0) ? ['-ss', String(Math.floor(startAt))] : [];   // retoma de onde parou (reconexão/erro)
+  const live = !cap1080;   // cap1080 marca VOD (filme/série/local); sem ele é canal ao vivo
+  const vtune = live ? ['-tune', 'zerolatency'] : [];   // zerolatency só no ao vivo; no VOD rende imagem mais estável
   const ff = spawn('ffmpeg', [
     '-hide_banner', '-loglevel', 'error',
-    ...inFlags, '-fflags', '+genpts', '-i', src,
+    ...inFlags, ...seek, '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err', '-i', src,
     ...vf,
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
-    '-g', '50', '-b:v', '3500k', '-maxrate', '3500k', '-bufsize', '7000k',
+    '-c:v', 'libx264', '-preset', 'ultrafast', ...vtune, '-profile:v', 'main', '-pix_fmt', 'yuv420p',
+    '-g', '25', '-keyint_min', '25', '-sc_threshold', '0',   // keyframe a cada ~1s: pixelização (macrobloco) se recupera rápido
+    '-b:v', '3500k', '-maxrate', '3500k', '-bufsize', '7000k',
+    '-max_muxing_queue_size', '1024', '-avoid_negative_ts', 'make_zero',
     '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
     ...out
   ]);
@@ -899,7 +904,7 @@ const server = http.createServer((req, res) => {
   if (p === '/transcode/local') {   // converte arquivo local (DivX/Xvid/HEVC de torrent ou baixado) -> H264 mp4
     const abs = path.resolve(q.get('f') || '');
     if (!insideRoots(abs)) { res.writeHead(403); return res.end(); }
-    return ffmpegTranscode(req, res, abs, false, true);
+    return ffmpegTranscode(req, res, abs, false, true, parseFloat(q.get('t')) || 0);
   }
   if (p === '/api/state') {
     const firstProfile = (CONFIG.profiles && CONFIG.profiles[0] && CONFIG.profiles[0].id) || 'eu';
@@ -986,7 +991,7 @@ const server = http.createServer((req, res) => {
       const bad = err || !up || !up.statusCode || up.statusCode >= 400;
       try { if (up) { up.resume(); up.destroy(); } } catch {}
       if (bad) { res.writeHead(502); return res.end('conteúdo indisponível no provedor'); }
-      ffmpegTranscode(req, res, src, true, true);
+      ffmpegTranscode(req, res, src, true, true, parseFloat(q.get('t')) || 0);
     });
   }
   if ((m = p.match(/^\/stream\/movie\/(\d+)\.([a-z0-9]+)$/i))) {

@@ -256,6 +256,7 @@ body.lite .spin{animation-duration:1.2s}
 .icbtn{min-width:36px;height:36px;padding:0 10px;border-radius:10px;border:1px solid var(--stroke);background:var(--panel);
   color:var(--muted);font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
 .icbtn:hover{color:var(--text);border-color:var(--stroke-2);background:var(--panel-2)}
+.icbtn.del:hover{color:#ff6b6b;border-color:#ff6b6b55;background:#ff6b6b18}
 
 /* painel de downloads */
 .dl-sheet{width:min(680px,100%)}
@@ -341,6 +342,9 @@ body.lite .compat-btn{backdrop-filter:none;background:#1a1a22}
 
 /* histórico (painel do olho) */
 .hist-h{font-size:14px;font-weight:600;color:var(--muted);margin:16px 2px 10px}
+.hist-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.hist-head .hist-h{margin:16px 2px 10px}
+#hist-clear{height:30px;min-width:0;padding:0 10px;font-size:12px}
 .hb{font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;margin-right:5px}
 .hb.dl{background:rgba(124,156,255,.16);color:var(--a1)}
 .hb.w{background:rgba(106,211,138,.14);color:#6ad38a}

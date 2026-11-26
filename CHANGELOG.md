@@ -2,6 +2,19 @@
 
 Todas as mudanças relevantes do Fluxo. Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.2] — 2026-11-25
+
+Gerenciar o histórico e reproduzir melhor o conteúdo convertido.
+
+### Adicionado
+- **Excluir do histórico:** cada item ganhou um 🗑. Item só **assistido** some na hora (é um registro local); item **baixado** confirma antes, porque remover de vez também apaga o arquivo baixado (e avisa que não dá pra desfazer).
+- **Limpar histórico:** botão **🧹 Limpar** zera de uma vez os assistidos e o "continuar assistindo". Os arquivos baixados **continuam** — para apagar um, use o 🗑 dele.
+
+### Corrigido
+- **Conteúdo convertido retoma de onde parou:** vídeo que o servidor converte na hora (HEVC/4K do provedor ou arquivo local em codec antigo) recomeçava do zero ao reconectar depois de um travamento. Agora o servidor reabre a conversão no ponto exato (o player passa a posição com `?t=`) tanto na reconexão quanto ao trocar para o modo de conversão.
+- **Menos pixelização** (quadradinhos de cor) no conteúdo convertido: keyframe a cada ~1 s (recupera de um engasgo em cerca de metade do tempo) e descarte de pacote corrompido em vez de mostrar bloco quebrado. O ajuste de baixa latência passou a valer só para canais ao vivo — no VOD a imagem fica mais estável.
+- **Diagnóstico mais honesto:** quando provedor e servidor estão no ar, o "Travou ou tá ruim?" não culpa mais a sua rede/Tailscale por padrão — diz que está tudo normal e que o engasgo foi passageiro.
+
 ## [0.2.1] — 2026-11-17
 
 Correção pontual de reprodução.
