@@ -2,6 +2,13 @@
 
 Todas as mudanças relevantes do Fluxo. Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.4] — 2026-11-26
+
+Som nos arquivos de torrent que vinham mudos.
+
+### Corrigido
+- **Áudio mudo em MKV de torrent (EAC3/AC3/DTS):** muito arquivo de série/filme baixado por torrent vem em MKV com áudio **EAC3 (Dolby Digital+)**, **AC3** ou **DTS** — o navegador toca o vídeo normal mas o **áudio fica mudo, sem dar erro nenhum** (o vídeo é h264, que toca; só o áudio é que ele não sabe decodificar). Agora o Fluxo detecta isso no servidor (via ffprobe) e resolve dos **dois jeitos**: toca **na hora** por uma conversão ao vivo do áudio (som imediato) e, em paralelo, **prepara uma versão definitiva** — copiando o vídeo sem recomprimir e convertendo só o áudio pra AAC — que mantém a **barra de tempo cheia** e o seek. Quando fica pronta (uns segundos), avisa pra tocar de novo já com barra + áudio. As versões preparadas são apagadas sozinhas depois de 14 dias sem uso, pra não lotar o disco.
+
 ## [0.2.3] — 2026-11-26
 
 Controle e clareza nos downloads de torrent.

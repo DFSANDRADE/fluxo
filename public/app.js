@@ -226,7 +226,7 @@ async function renderLocal(rows) {
   }
   rows.insertAdjacentHTML('beforeend', LOCAL_NOTE);
 }
-function playLocal(it) {
+async function playLocal(it) {
   clearTimeout(autoCacheT);
   openPlayer(it.name);
   showBuffer('Carregando arquivo…');          // local: arquivo na rede, não é o provedor
@@ -234,9 +234,30 @@ function playLocal(it) {
   const c = CONT['local:' + it.file]; const resume = c && c.pos ? c.pos : 0;
   saveCtx = { type: 'local', id: it.file, name: it.name, resumePos: resume };
   recordWatch('local', it.file, it.name, '');
-  video.src = `/local?f=${encodeURIComponent(it.file)}`; video.load();
-  video.onloadedmetadata = () => { if (resume > 5) video.currentTime = resume; };
+  // pergunta ao servidor como tocar: cru (web-ok) / preparado (barra cheia + áudio) / pipe (áudio já, sem barra)
+  let r = { mode: 'raw', src: `/local?f=${encodeURIComponent(it.file)}` };
+  try { r = await api(`/api/local/ready?f=${encodeURIComponent(it.file)}`); } catch {}
+  if (saveCtx && saveCtx.id !== it.file) return;   // o usuário já trocou de vídeo
+  if (r.mode === 'pipe') {                          // áudio EAC3/DivX: toca já pelo pipe; versão c/ barra preparando
+    saveCtx._tc = true; saveCtx._tcOff = 0;
+    showBuffer(r.reason === 'audio' ? 'Convertendo o áudio pra tocar aqui…' : 'Convertendo pra tocar aqui…');
+    prepHint(it.file, it.name);                     // avisa quando a versão com barra ficar pronta
+  }
+  video.src = r.src; video.load();
+  if (r.mode !== 'pipe') video.onloadedmetadata = () => { if (resume > 5) video.currentTime = resume; };
   video.play().catch(() => {});
+}
+// Enquanto toca pelo pipe, fica de olho no preparo: quando a versão com barra fica pronta, oferece recarregar.
+let prepT = null;
+function prepHint(file, name) {
+  clearTimeout(prepT);
+  prepT = setTimeout(async function tick() {
+    if (!saveCtx || saveCtx.id !== file) return;
+    let r = {}; try { r = await api(`/api/local/ready?f=${encodeURIComponent(file)}`); } catch {}
+    if (!saveCtx || saveCtx.id !== file) return;
+    if (r.mode === 'prepared') { toast('✅ Versão com barra de tempo pronta — toque de novo pra usar'); return; }
+    prepT = setTimeout(tick, 5000);
+  }, 5000);
 }
 
 /* ---------- Torrents (Jackett busca + transmission baixa pra Mídia Local) ---------- */
@@ -995,7 +1016,7 @@ function playFromHistory(h) {
   if (h.type === 'movie') { const d = dlOf('movie', h.id); playVOD(h.id, (d && d.ext) || 'mp4', h.name, h.icon); }
   else if (h.type === 'series') { const c = CONT['series:' + h.id]; resumeSeriesCont((c && c.id) ? c : { id: h.id, sid: h.sid, name: h.name, icon: h.icon, ext: 'mp4', pos: 0 }); }
   else if (h.type === 'live') playLive(INDEX.live[h.id] || { stream_id: h.id, name: h.name, stream_icon: h.icon });
-  else { saveCtx = null; playNative(`/local?f=${encodeURIComponent(h.id)}`, h.name); }
+  else playLocal({ file: h.id, name: h.name });   // arquivo local: roteia por /api/local/ready (áudio + barra)
 }
 function openDownloads() { refreshDL().then(() => { renderDownloads(); $('#downloads').classList.remove('hidden'); startDLPolling(); }); }
 function closeDownloads() { $('#downloads').classList.add('hidden'); }

@@ -10,7 +10,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const { URL, URLSearchParams } = require('url');
 const os = require('os');
 
@@ -369,6 +369,74 @@ function serveLocal(req, res, abs) {
       fs.createReadStream(abs).pipe(res);
     }
   });
+}
+
+// ---- Preparo de arquivos locais não-web (ex.: MKV com áudio EAC3/AC3/DTS, ou DivX) ----
+// Alguns torrents vêm em MKV com áudio EAC3/AC3/DTS: o navegador toca o VÍDEO mas o áudio
+// fica MUDO (sem disparar erro). Aqui a gente converte SÓ o áudio pra AAC (copia o vídeo h264
+// quando dá — rápido) num .mp4 cacheado, servido com Range → mantém a BARRA de tempo cheia.
+const PREP_DIR = path.join(DLDIR, '_prep');
+try { fs.mkdirSync(PREP_DIR, { recursive: true }); } catch {}
+const WEB_VCODEC = new Set(['h264', 'avc1', 'vp8', 'vp9', 'av1']);
+const WEB_ACODEC = new Set(['aac', 'mp3', 'opus', 'vorbis']);
+const WEB_EXT = new Set(['.mp4', '.m4v', '.mov', '.webm']);   // mkv/avi/ts não tocam bem nativo
+const probeCache = new Map();   // abs -> { mtime, info }
+const prepJobs = new Map();     // abs -> { pct, done, err, out }
+const prepPath = (abs) => path.join(PREP_DIR, crypto.createHash('sha1').update(abs).digest('hex') + '.mp4');
+// os preparados são regeneráveis (só conversão de áudio); apaga os não tocados há +14 dias p/ não lotar o disco
+function prunePrep() {
+  const limit = Date.now() - 14 * 864e5;
+  fs.readdir(PREP_DIR, (e, files) => {
+    if (e) return;
+    files.forEach(f => fs.stat(path.join(PREP_DIR, f), (er, st) => {
+      if (!er && st.atimeMs < limit && st.mtimeMs < limit) fs.unlink(path.join(PREP_DIR, f), () => {});
+    }));
+  });
+}
+try { prunePrep(); } catch {}
+
+function probeLocal(abs, cb) {
+  fs.stat(abs, (e, st) => {
+    if (e) return cb(e);
+    const c = probeCache.get(abs);
+    if (c && c.mtime === st.mtimeMs) return cb(null, c.info);
+    execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name', '-of', 'json', abs], { maxBuffer: 1 << 20 }, (err, out) => {
+      if (err) return cb(err);
+      let j = {}; try { j = JSON.parse(out); } catch {}
+      const streams = j.streams || [];
+      const v = streams.find(s => s.codec_type === 'video');
+      const a = streams.find(s => s.codec_type === 'audio');
+      const ext = path.extname(abs).toLowerCase();
+      const info = { vcodec: v ? v.codec_name : '', acodec: a ? a.codec_name : '', hasAudio: !!a, ext };
+      info.webReady = WEB_EXT.has(ext) && (!v || WEB_VCODEC.has(info.vcodec)) && (!a || WEB_ACODEC.has(info.acodec));
+      probeCache.set(abs, { mtime: st.mtimeMs, info });
+      cb(null, info);
+    });
+  });
+}
+function startPrep(abs, info) {
+  const out = prepPath(abs);
+  try { if (fs.existsSync(out) && fs.statSync(out).size > 0) return; } catch {}   // já pronto
+  if (prepJobs.has(abs)) return;                                                   // já rodando
+  prunePrep();                                                                     // aproveita p/ limpar preparados antigos
+  const tmp = out + '.part';
+  const vArgs = WEB_VCODEC.has(info.vcodec) ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p'];
+  const job = { pct: 0, done: false, err: false, out };
+  prepJobs.set(abs, job);
+  // -f mp4 é obrigatório: o alvo tem extensão .part e o ffmpeg não adivinha o formato por ela
+  const ff = spawn('ffmpeg', ['-hide_banner', '-y', '-i', abs, '-map', '0:v:0', '-map', '0:a:0?', ...vArgs, '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-movflags', '+faststart', '-f', 'mp4', tmp]);
+  let dur = 0; let lastErr = '';
+  ff.stderr.on('data', d => {
+    const s = d.toString(); let m; lastErr = s;
+    if (!dur && (m = /Duration: (\d+):(\d+):(\d+)/.exec(s))) dur = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
+    if (dur && (m = /time=(\d+):(\d+):(\d+)/.exec(s))) job.pct = Math.min(99, Math.round(((+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])) / dur * 100));
+  });
+  ff.on('close', code => {
+    if (code === 0) { try { fs.renameSync(tmp, out); job.done = true; job.pct = 100; } catch { job.err = true; } }
+    else { job.err = true; console.error('[prep] falhou:', (lastErr || '').slice(-160)); try { fs.unlinkSync(tmp); } catch {} }
+    setTimeout(() => prepJobs.delete(abs), 20000);   // some do mapa (o arquivo pronto fica em disco)
+  });
+  ff.on('error', (e) => { job.err = true; console.error('[prep] spawn erro:', e.message); try { fs.unlinkSync(tmp); } catch {} });
 }
 
 // ---- cache de imagens (disco + navegador) + encolhimento de pôster TMDb ----
@@ -900,6 +968,27 @@ const server = http.createServer((req, res) => {
     const abs = path.resolve(q.get('f') || '');
     if (!insideRoots(abs)) { res.writeHead(403); return res.end(); }
     return serveLocal(req, res, abs);
+  }
+  // Decide como tocar um arquivo local: cru (web-ok), versão preparada (barra cheia + áudio) ou pipe (áudio já).
+  if (p === '/api/local/ready') {
+    const abs = path.resolve(q.get('f') || '');
+    if (!insideRoots(abs)) return sendJSON(res, 403, { error: 'fora' });
+    const rawUrl = '/local?f=' + encodeURIComponent(abs);
+    return probeLocal(abs, (e, info) => {
+      if (e || !info || info.webReady) return sendJSON(res, 200, { mode: 'raw', src: rawUrl });
+      const out = prepPath(abs);
+      let ready = false; try { ready = fs.existsSync(out) && fs.statSync(out).size > 0; } catch {}
+      if (ready) return sendJSON(res, 200, { mode: 'prepared', src: '/localprep?f=' + encodeURIComponent(abs) });
+      startPrep(abs, info);                      // começa (ou já está) preparando em 2º plano
+      const job = prepJobs.get(abs);
+      // fallback: toca já pelo pipe (tem áudio, sem barra); a versão com barra fica pronta pra próxima vez
+      return sendJSON(res, 200, { mode: 'pipe', src: '/transcode/local?f=' + encodeURIComponent(abs), prep: job ? job.pct : 0, reason: info.hasAudio ? 'audio' : 'video' });
+    });
+  }
+  if (p === '/localprep') {
+    const abs = path.resolve(q.get('f') || '');
+    if (!insideRoots(abs)) { res.writeHead(403); return res.end(); }
+    return serveLocal(req, res, prepPath(abs));
   }
   if (p === '/transcode/local') {   // converte arquivo local (DivX/Xvid/HEVC de torrent ou baixado) -> H264 mp4
     const abs = path.resolve(q.get('f') || '');
