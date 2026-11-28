@@ -2,6 +2,21 @@
 
 Todas as mudanças relevantes do Fluxo. Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.6] — 2026-11-28
+
+Episódios que cortavam no meio, pulavam pro próximo ou voltavam pro começo. Tudo com a mesma raiz: o provedor **derruba a conexão no meio do arquivo** (com frequência, em alguns títulos) e o Fluxo reagia errado a isso.
+
+### Corrigido
+- **Episódio "acabava" no meio e pulava pro próximo:** quando o provedor cortava a conexão, o servidor fechava a resposta como se o arquivo tivesse terminado; o navegador entendia "fim do vídeo" e o player avançava pro próximo episódio — que começava "em outra cena", porque o anterior não tinha acabado. Agora:
+  - o **servidor retoma sozinho do byte exato onde o provedor cortou** e continua na mesma resposta (o player nem percebe). Se não der pra retomar, responde com **erro** — nunca com um fim falso;
+  - o **player só avança de episódio se chegou mesmo no fim** (até 5 s da duração real). Um "fim" antes disso é tratado como queda: reconecta no mesmo ponto. Se o arquivo estiver realmente cortado no provedor naquele ponto, depois de 3 tentativas mostra um aviso claro em vez de ficar em loop. Vale também pra filmes.
+- **Voltava pro começo depois de muitas travadas:** ao reconectar, o vídeo recomeça do zero *enquanto* volta pro ponto certo; esse "zero" temporário sobrescrevia a posição guardada. Agora a posição só é atualizada depois que o vídeo voltou de fato ao ponto.
+- **Reconectar com o episódio já baixado dava erro:** a reconexão apontava pra uma rota que não existe (`/dl/…`), o que dava 404 e jogava o vídeo à toa no modo "conversão" (por isso aparecia "transcode H265→H264" em episódio comum). Agora reconecta no arquivo baixado.
+- **Download cortado era marcado como pronto:** se o provedor derrubasse a conexão no meio do download, o arquivo ficava pela metade e era marcado como concluído. Agora o download **retoma do byte onde parou** e só é marcado como pronto se vier **completo** (testado com 65 cortes num episódio de 206 MB: arquivo idêntico ao original).
+
+### Alterado
+- **Assistir = baixar, de verdade:** o cache temporário começa a baixar em **5 s** (era 30 s) e, quando termina (o servidor baixa o episódio inteiro em segundos), o **player troca sozinho pro arquivo do servidor no mesmo ponto**, com aviso na tela. A partir daí não depende mais do provedor — acabam os cortes e as travadas daquele episódio. Antes o arquivo ficava pronto no servidor mas o player continuava puxando do provedor até o fim.
+
 ## [0.2.5] — 2026-11-26
 
 Organizar e limpar os Baixados sem precisar de rede/Samba.

@@ -728,6 +728,44 @@ function startBufMon() {
 
 // posição REAL do conteúdo: no transcode o pipe começa num offset (_tcOff) e o currentTime é relativo a ele
 function effPos() { return saveCtx && saveCtx._tc ? (saveCtx._tcOff || 0) + (video.currentTime || 0) : (video.currentTime || 0); }
+// chegou MESMO no fim? (até 5s da duração real). Sem duração conhecida, NÃO assume fim — melhor reconectar do que pular.
+function reachedRealEnd() {
+  const dur = (saveCtx && saveCtx._dur) || (isFinite(video.duration) ? video.duration : 0);
+  return dur > 0 && effPos() >= dur - 5;
+}
+// 'ended' antes do fim = stream cortado → reconecta no ponto. Se cortar 3x no MESMO ponto, o arquivo
+// do provedor está quebrado ali: para de insistir (sem loop infinito) e chama onGiveUp com a posição.
+function prematureEnd(onGiveUp) {
+  const p = effPos();
+  saveCtx._eofN = (saveCtx._eofAt != null && Math.abs(p - saveCtx._eofAt) < 20) ? (saveCtx._eofN || 0) + 1 : 1;
+  saveCtx._eofAt = p;
+  if (saveCtx._eofN > 3) { onGiveUp(p); return; }
+  retryN = 0; reconnectStream();
+}
+const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const localTcSrc = (file, t) => `/transcode/local?f=${encodeURIComponent(file)}` + (t > 1 ? `&t=${Math.floor(t)}` : '');
+
+// O cache temporário baixa o episódio/filme INTEIRO no servidor em ~30s (o servidor puxa bem mais rápido
+// do que o vídeo toca). Assim que terminar, troca a reprodução pro arquivo local NO MESMO PONTO:
+// a partir daí não depende mais do provedor — acabam os cortes, travadas e "fins" falsos.
+function swapToLocalIfReady() {
+  if (!saveCtx || (saveCtx.type !== 'movie' && saveCtx.type !== 'series') || saveCtx._localSrc) return;
+  const d = dlOf(saveCtx.type === 'movie' ? 'movie' : 'series', saveCtx.id);
+  if (!d || d.status !== 'done') return;
+  saveCtx._localSrc = true;
+  const t = Math.max(effPos(), saveCtx.resumePos || 0), wasPaused = video.paused;
+  destroyPlayers();
+  if (saveCtx._tc) {   // estava convertendo (formato pesado): converte a partir do arquivo local, já no ponto
+    saveCtx._tcOff = t; saveCtx._pending = null;
+    video.src = localTcSrc(d.file, t); video.load();
+  } else {
+    saveCtx._pending = t > 3 ? t : null;
+    video.src = `/local?f=${encodeURIComponent(d.file)}`; video.load();
+    video.onloadedmetadata = () => { if (t > 3) try { video.currentTime = t; } catch {} };
+  }
+  if (!wasPaused) video.play().catch(() => {});
+  toast('✅ Já baixou no servidor — tocando de lá agora, sem depender do provedor');
+}
 
 // reconecta filme/episódio no ponto atual (usado em erro E em travamento prolongado)
 let stallT = null, lastProg = 0, stallCount = 0;
@@ -736,11 +774,16 @@ function reconnectStream() {
   if (retryN++ > 6) { hideBuffer(); toast('Não consegui reconectar — o provedor pode estar fora do ar'); return; }
   const t = Math.max(effPos(), saveCtx.resumePos || 0);   // erro de rede zera currentTime → usa a última posição boa
   const kind = saveCtx.type === 'movie' ? 'movie' : 'series';
+  // já baixou no servidor? reconecta NO ARQUIVO LOCAL (não depende mais do provedor instável).
+  // (antes apontava pra /dl/<arquivo>, rota que não existe → 404 → caía no transcode à toa)
+  const d = dlOf(kind, saveCtx.id), local = d && d.status === 'done';
+  if (local) saveCtx._localSrc = true;
   let url;
-  if (saveCtx._tc) { saveCtx._tcOff = t; url = transcodeSrc(t); }   // convertendo: reabre o transcode JÁ no ponto (senão recomeça do zero)
-  else { const d = dlOf(kind, saveCtx.id); url = (d && d.status === 'done') ? `/dl/${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`; }
+  if (saveCtx._tc) { saveCtx._tcOff = t; url = local ? localTcSrc(d.file, t) : transcodeSrc(t); }   // convertendo: reabre o transcode JÁ no ponto (senão recomeça do zero)
+  else url = local ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/${kind}/${saveCtx.id}.${saveCtx.ext}`;
   showBuffer('Travou — reconectando pra você, aguarde…');
   const seekBack = !saveCtx._tc && t > 3;   // no transcode o pipe já começa no ponto; seek só no stream normal
+  saveCtx._pending = seekBack ? t : null;   // ponto-alvo: o timeupdate não deixa o resume cair enquanto o seek não volta
   setTimeout(() => { destroyPlayers(); video.src = url; video.load(); if (seekBack) video.onloadedmetadata = () => { try { video.currentTime = t; } catch {} }; video.play().catch(() => {}); }, 800);
 }
 
@@ -754,7 +797,16 @@ video.addEventListener('waiting', () => {
 ['playing', 'canplay'].forEach(ev => video.addEventListener(ev, () => { hideBuffer(); clearTimeout(stallT); }));
 video.addEventListener('pause', () => { if (video.readyState > 2) hideBuffer(); clearTimeout(stallT); clearTimeout(noVidT); });
 video.addEventListener('playing', () => { retryN = 0; startNoVideoWatch(); });
-video.addEventListener('timeupdate', () => { lastProg = Date.now(); clearTimeout(stallT); if (saveCtx && video.currentTime > 1) saveCtx.resumePos = effPos(); });   // posição boa sempre fresca p/ reconexão
+video.addEventListener('timeupdate', () => {
+  lastProg = Date.now(); clearTimeout(stallT);
+  if (!saveCtx) return;
+  const pos = effPos();
+  // depois de reconectar, o vídeo recomeça do 0 ENQUANTO faz o seek de volta ao ponto.
+  // sem isto, esse "zero" temporário sobrescrevia o resume e perdia o lugar (voltava pro começo).
+  if (saveCtx._pending != null) { if (pos >= saveCtx._pending - 2) saveCtx._pending = null; else return; }
+  if (video.currentTime > 1) saveCtx.resumePos = pos;   // posição boa sempre fresca p/ reconexão
+  if (isFinite(video.duration) && video.duration > 0 && !saveCtx._tc) saveCtx._dur = video.duration;   // duração REAL p/ saber quando é fim de verdade
+});
 video.addEventListener('error', onVideoError);
 
 // URL de transcode (converte no servidor) pro que estiver tocando; off = segundo pra retomar (o pipe começa lá)
@@ -798,8 +850,10 @@ function startNoVideoWatch() {
 function scheduleAutoCache(type, id, ext, name, icon) {
   clearTimeout(autoCacheT);
   const d = dlOf(type, id);
-  if (d && (d.status === 'done' || d.status === 'downloading')) return;
-  autoCacheT = setTimeout(() => { srvDownload(type, id, ext, name, icon, true).then(() => startDLPolling()); }, 30000);
+  if (d && d.status === 'done') return;
+  if (d && d.status === 'downloading') { startDLPolling(); return; }   // já está baixando: só acompanha pra trocar pro local quando acabar
+  // começa logo (5s, não 30s): quanto antes o arquivo estiver inteiro no servidor, antes paramos de depender do provedor
+  autoCacheT = setTimeout(() => { srvDownload(type, id, ext, name, icon, true).then(() => startDLPolling()); }, 5000);
 }
 
 function destroyPlayers() {
@@ -897,8 +951,11 @@ function playVOD(id, ext, name, icon, resume) {
   saveCtx = { type: 'movie', id, ext, name, icon: icon || item.stream_icon, resumePos: resume || 0 };
   const d = dlOf('movie', id);
   const url = (d && d.status === 'done') ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/movie/${id}.${ext}`;
+  saveCtx._localSrc = !!(d && d.status === 'done');
   playNative(url, name, resume);
-  video.onended = null;
+  video.onended = () => {   // filme cortado no meio → reconecta, não "acaba"
+    if (saveCtx && !reachedRealEnd()) prematureEnd(p => showError(`✂️ O arquivo deste filme no provedor termina em ${mmss(p)} (está cortado lá). Tentei 3 vezes — tente outra versão do título.`));
+  };
   scheduleAutoCache('movie', id, ext, name, icon || item.stream_icon);
 }
 
@@ -912,11 +969,20 @@ function playEpisode(ep, list, idx, seriesName, bg, seriesId, season) {
   if (sid) { EPMAP[ep.id] = { sid, season: ep.season || season }; store.set('epmap', EPMAP); }
   const d = dlOf('series', ep.id);
   const url = (d && d.status === 'done') ? `/local?f=${encodeURIComponent(d.file)}` : `/stream/series/${ep.id}.${ext}`;
+  saveCtx._localSrc = !!(d && d.status === 'done');
   playNative(url, name, resume);
   scheduleAutoCache('series', ep.id, ext, `${seriesName} E${ep.episode_num}`, bg);
   epNav = { list, idx, seriesName, bg, sid }; updateEpNav();   // caixa de próximo + botões ⏮⏭ (fora de tela cheia)
   const next = list[idx + 1];
-  video.onended = () => { if (next) playEpisode(next, list, idx + 1, seriesName, bg, seriesId, season); };
+  video.onended = () => {
+    // o provedor às vezes CORTA o stream no meio e o navegador dispara 'ended' como se tivesse acabado.
+    // antes isso pulava pro próximo episódio no meio da cena. Agora só avança se chegou MESMO no fim.
+    if (saveCtx && !reachedRealEnd()) {
+      prematureEnd(p => showError(`✂️ O arquivo do E${ep.episode_num} no provedor termina em ${mmss(p)} (está cortado lá, não é o Fluxo). Tentei 3 vezes.${next ? ' Use ⏭ pra ir ao próximo.' : ''}`));
+      return;
+    }
+    if (next) playEpisode(next, list, idx + 1, seriesName, bg, seriesId, season);
+  };
   video.ontimeupdate = () => { saveProgress(); };
 }
 
@@ -987,6 +1053,7 @@ function startDLPolling() {
   if (dlPoll) return;
   dlPoll = setInterval(async () => {
     await refreshDL();
+    swapToLocalIfReady();   // o que estou assistindo terminou de baixar? passa a tocar do servidor
     if (!$('#downloads').classList.contains('hidden')) renderDownloads();
     if (TYPE === 'local' && !SEARCHING) renderLocal($('#rows'));   // aba Baixados atualiza o progresso sozinha
     if (_srvRefresh) _srvRefresh();

@@ -236,12 +236,21 @@ function passThroughJSON(res, buf) {
 }
 
 // Repassa um stream (com suporte a Range pra seek em filmes).
+// VOD (opts.resume): o provedor às vezes CORTA a conexão no meio do arquivo. Antes a gente fechava a
+// resposta "limpa" e o navegador achava que o vídeo ACABOU (pulava pro próximo episódio no meio da cena).
+// Agora: se cortar antes do último byte, reabre do byte exato onde parou (Range) e continua na MESMA
+// resposta — o player nem percebe. Se não der pra retomar, ABORTA (erro de rede), nunca um fim falso.
 function proxyStream(req, res, upstreamUrl, opts) {
   opts = opts || {};
   const headers = {};
   if (req.headers.range) headers['Range'] = req.headers.range;
+  let gone = false, cur = null, first = false;
+  const stop = () => { gone = true; try { cur && cur.destroy(); } catch {} };
+  res.on('error', stop); res.on('close', stop); req.on('close', stop);   // cliente fechou: solta o upstream
   openUpstream(upstreamUrl, headers, (err, up) => {
-    if (err) { res.writeHead(502); return res.end('upstream error'); }
+    if (first) return; first = true;   // openUpstream pode chamar o cb 2x (erro depois da resposta)
+    if (err) { if (!res.headersSent) { res.writeHead(502); res.end('upstream error'); } return; }
+    if (gone) { try { up.destroy(); } catch {} return; }
     const out = {};
     ['content-type', 'content-length', 'accept-ranges', 'content-range'].forEach((k) => {
       if (up.headers[k]) out[k] = up.headers[k];
@@ -249,10 +258,48 @@ function proxyStream(req, res, upstreamUrl, opts) {
     out['Cache-Control'] = 'no-store';
     if (opts.filename) out['Content-Disposition'] = `attachment; filename="${opts.filename.replace(/"/g, '')}"`;
     res.writeHead(up.statusCode || 200, out);
-    const stop = () => { try { up.destroy(); } catch {} };
-    up.on('error', () => { try { res.end(); } catch {} });   // upstream caiu: fecha a resposta, não derruba o server
-    res.on('error', stop); res.on('close', stop); req.on('close', stop);   // cliente fechou: solta o upstream
-    up.pipe(res);
+    // faixa de bytes que prometemos ao navegador: [pos .. end]
+    let pos = 0, end = -1, tries = 0;   // tries = falhas SEGUIDAS sem progresso (zera quando chega dado)
+    const cr = /bytes\s+(\d+)-(\d+)\//i.exec(up.headers['content-range'] || '');
+    if (up.statusCode === 206 && cr) { pos = +cr[1]; end = +cr[2]; }
+    else if (up.statusCode === 200 && up.headers['content-length']) end = +up.headers['content-length'] - 1;
+    const resumable = !!opts.resume && end >= 0;
+    const reopen = () => setTimeout(() => {
+      if (gone) return;
+      let once = false;
+      openUpstream(upstreamUrl, { Range: `bytes=${pos}-${end}` }, (e2, u2) => {
+        if (once) return; once = true;
+        if (gone) { try { u2 && u2.destroy(); } catch {} return; }
+        const c2 = u2 && /bytes\s+(\d+)-/i.exec(u2.headers['content-range'] || '');
+        if (e2 || !u2 || u2.statusCode !== 206 || !c2 || +c2[1] !== pos) {
+          try { u2 && u2.destroy(); } catch {}
+          if (++tries > 6) { console.error(`[stream] provedor cortou em ${pos}/${end + 1} e não deixou retomar — abortando`); return res.destroy(); }
+          return reopen();
+        }
+        console.log(`[stream] provedor cortou no meio — retomado do byte ${pos} (${Math.round(pos / (end + 1) * 100)}%)`);
+        attach(u2);
+      });
+    }, tries ? Math.min(400 * tries, 2000) : 150);
+    const attach = (u) => {
+      cur = u; let settled = false; const from = pos;
+      u.on('data', (c) => { pos += c.length; });
+      u.pipe(res, { end: false });
+      const settle = (clean) => {
+        if (settled) return; settled = true;
+        try { u.unpipe(res); } catch {}
+        if (gone) return;
+        if (resumable ? pos > end : clean) return res.end();   // entregou tudo: fim DE VERDADE
+        if (!resumable) return res.destroy();                  // sem como retomar: erro (o player reconecta), não fim falso
+        tries = pos > from ? 0 : tries + 1;                    // veio dado antes do corte? não conta como falha
+        if (tries > 6) return res.destroy();
+        reopen();
+      };
+      u.on('end', () => settle(true));
+      u.on('error', () => settle(false));
+      u.on('aborted', () => settle(false));
+      u.on('close', () => settle(false));
+    };
+    attach(up);
   });
 }
 
@@ -291,18 +338,53 @@ function startDownload({ type, id, ext, name, icon, pv, auto }) {
   const rec = DOWNLOADS[key] = { key, type, id, ext, name, icon, file: abs, status: 'downloading', received: 0, total: 0, at: Date.now(), auto: !!auto };
   if (auto) rec.expireAt = Date.now() + AUTO_TTL;
   const url = `${pv.base}/${type === 'series' ? 'series' : 'movie'}/${pv.username}/${pv.password}/${id}.${ext}`;
-  openUpstream(url, {}, (err, up) => {
-    if (err) { rec.status = 'error'; saveDLIndex(); return; }
-    rec.total = parseInt(up.headers['content-length'] || '0', 10) || 0;
-    const tmp = abs + '.part';
-    const ws = fs.createWriteStream(tmp);
-    rec._abort = () => { try { up.destroy(); ws.destroy(); } catch {} };
-    up.on('data', (c) => { rec.received += c.length; });
-    up.pipe(ws);
-    ws.on('finish', () => { try { fs.renameSync(tmp, abs); rec.status = 'done'; } catch { rec.status = 'error'; } saveDLIndex(); });
-    ws.on('error', () => { rec.status = 'error'; saveDLIndex(); });
-    up.on('error', () => { rec.status = 'error'; saveDLIndex(); });
-  });
+  // à prova de corte: se o provedor derrubar a conexão no meio, retoma do byte onde parou (Range) e só
+  // marca 'done' se o arquivo veio COMPLETO. Antes, um corte virava "pronto" com o arquivo pela metade.
+  const tmp = abs + '.part';
+  let fails = 0, started = false, aborted = false, cur = null, curWs = null;   // fails = falhas SEGUIDAS sem progresso
+  rec._abort = () => { aborted = true; try { cur && cur.destroy(); curWs && curWs.destroy(); } catch {} };
+  const fail = () => { if (aborted) return; rec.status = 'error'; saveDLIndex(); };
+  const retry = (progressed) => {
+    if (aborted) return;
+    fails = progressed ? 0 : fails + 1;   // cortou depois de baixar um pedaço = normal, retoma já; sem progresso = conta falha
+    if (fails > 8) { console.error(`[download] ${name}: provedor falhou ${fails - 1}x seguidas — desisti em ${rec.received}/${rec.total}`); return fail(); }
+    setTimeout(pull, progressed ? 200 : Math.min(1000 * fails, 5000));
+  };
+  const pull = () => {
+    if (aborted) return;
+    let have = 0; if (started) try { have = fs.statSync(tmp).size; } catch {}
+    started = true;   // primeira tentativa começa do zero (sobrescreve .part velho)
+    rec.received = have;
+    let once = false;
+    openUpstream(url, have > 0 ? { Range: `bytes=${have}-` } : {}, (err, up) => {
+      if (once) return; once = true;
+      if (aborted) { try { up && up.destroy(); } catch {} return; }
+      if (err || !up || up.statusCode >= 400) { try { up && up.resume(); } catch {} return retry(false); }
+      if (have > 0 && up.statusCode !== 206) { try { up.destroy(); } catch {} return fail(); }   // provedor não retoma: não finge que terminou
+      if (!rec.total) {
+        const cr = /\/(\d+)\s*$/.exec(up.headers['content-range'] || '');
+        rec.total = cr ? +cr[1] : (parseInt(up.headers['content-length'] || '0', 10) || 0);
+      }
+      if (have > 0) console.log(`[download] ${name}: provedor cortou — retomando do byte ${have}/${rec.total}`);
+      cur = up;
+      const ws = curWs = fs.createWriteStream(tmp, { flags: have > 0 ? 'a' : 'w' });
+      let wsEnded = false;
+      const endWs = () => { if (!wsEnded) { wsEnded = true; try { ws.end(); } catch {} } };
+      up.on('data', (c) => { rec.received += c.length; });
+      up.pipe(ws);
+      up.on('end', () => { wsEnded = true; });   // o pipe já fecha o ws sozinho no fim normal
+      up.on('error', endWs); up.on('aborted', endWs); up.on('close', endWs);
+      ws.on('error', () => fail());
+      ws.on('finish', () => {
+        if (aborted) return;
+        let size = 0; try { size = fs.statSync(tmp).size; } catch {}
+        if (rec.total && size < rec.total) return retry(size > have);   // veio cortado: retoma do byte onde parou
+        try { fs.renameSync(tmp, abs); rec.received = size; rec.status = 'done'; } catch { rec.status = 'error'; }
+        saveDLIndex();
+      });
+    });
+  };
+  pull();
   saveDLIndex();
   return rec;
 }
@@ -1114,11 +1196,11 @@ const server = http.createServer((req, res) => {
   }
   if ((m = p.match(/^\/stream\/movie\/(\d+)\.([a-z0-9]+)$/i))) {
     const dl = q.get('dl') ? { filename: `${sanitize(q.get('name') || 'filme')}.${m[2]}` } : undefined;
-    return proxyStream(req, res, `${pv.base}/movie/${pv.username}/${pv.password}/${m[1]}.${m[2]}`, dl);
+    return proxyStream(req, res, `${pv.base}/movie/${pv.username}/${pv.password}/${m[1]}.${m[2]}`, Object.assign({ resume: true }, dl));
   }
   if ((m = p.match(/^\/stream\/series\/(\d+)\.([a-z0-9]+)$/i))) {
     const dl = q.get('dl') ? { filename: `${sanitize(q.get('name') || 'episodio')}.${m[2]}` } : undefined;
-    return proxyStream(req, res, `${pv.base}/series/${pv.username}/${pv.password}/${m[1]}.${m[2]}`, dl);
+    return proxyStream(req, res, `${pv.base}/series/${pv.username}/${pv.password}/${m[1]}.${m[2]}`, Object.assign({ resume: true }, dl));
   }
 
   serveStatic(res, p);

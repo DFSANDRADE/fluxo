@@ -30,6 +30,7 @@
 - **🧲 Torrents integrados** (opcional) — busca via [Jackett](https://github.com/Jackett/Jackett) e baixa pelo transmission, direto da interface, com **pausar/retomar** e status claro de cada download (procurando peers, pausado, baixando…).
 - **❤️ Favoritos, histórico e "continuar assistindo"** que **sincronizam entre os aparelhos** (ficam no servidor, não só no navegador). Dá pra **remover um item** do histórico ou **limpar tudo** quando quiser.
 - **⏭️ Próximo episódio automático**, **retomar de onde parou** e **reconexão** se a internet oscilar.
+- **🛡️ À prova de provedor instável** — o que você assiste é baixado pro servidor em segundos e o player passa a tocar de lá, no mesmo ponto. Se o provedor derrubar a conexão no meio, o servidor retoma do byte exato onde parou (o vídeo nem percebe) — sem "fim" falso no meio do episódio, sem pular pro próximo, sem voltar pro começo.
 - **📶 Guia de programação (EPG)** com o que está passando agora e a seguir.
 - **🗂️ Aba "Baixados"** — tudo que você baixou (ou jogou na pasta via rede) toca offline aqui, em grade com **ordenação por recentes, nome ou pasta**, **lixeira em cada arquivo** (exclui direto pela tela, sem Samba) e botão de **limpar temporários**.
 - **🔊 Áudio que o navegador não toca, resolvido** — arquivos em MKV com áudio EAC3/AC3/DTS (comum em torrents) tocariam **mudos**; o Fluxo converte só o áudio pra AAC automaticamente (copiando o vídeo, sem recomprimir) e mantém a barra de tempo.
